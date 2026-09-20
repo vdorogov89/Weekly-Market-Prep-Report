@@ -35,6 +35,7 @@ NOTE ON RELIABILITY:
 import os
 import statistics
 import sys
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -43,6 +44,11 @@ from dateutil import parser as date_parser
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
+
+# Alpha Vantage's free tier rejects back-to-back requests faster than
+# ~1/second (and recommends spacing them out more than that in practice).
+# We wait this many seconds before each Alpha Vantage call after the first.
+ALPHA_VANTAGE_DELAY_SECONDS = 15
 
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
@@ -215,7 +221,10 @@ def build_message() -> str:
     # EURUSD is typically quoted to 4-5 decimals, XAUUSD to 2.
     decimals_by_label = {"EURUSD": 5, "XAUUSD": 2}
 
-    for label, (from_symbol, to_symbol) in INSTRUMENTS.items():
+    for i, (label, (from_symbol, to_symbol)) in enumerate(INSTRUMENTS.items()):
+        if i > 0:
+            # Avoid Alpha Vantage's free-tier rate limit between calls.
+            time.sleep(ALPHA_VANTAGE_DELAY_SECONDS)
         try:
             bars = fetch_weekly_bars(from_symbol, to_symbol)
             stats = compute_stats(bars)
