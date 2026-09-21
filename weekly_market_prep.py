@@ -7,7 +7,9 @@ to the same Telegram bot. Nothing in sentiment_report.py is touched.
 
 What this sends:
 1. Economic calendar for USD (High/Medium impact events for the current
-   week) — from Forex Factory's free public JSON feed.
+   week) — from Forex Factory's free public JSON feed. Also published
+   as a subscribable .ics file (docs/economic_calendar.ics) so it can
+   show up directly in a phone's calendar app.
 2. Average weekly range for EURUSD and XAUUSD (like a weekly ATR) —
    from Twelve Data's free weekly OHLC data, averaged over the last 8
    completed weeks.
@@ -38,7 +40,7 @@ NOTE ON RELIABILITY:
 import os
 import statistics
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -116,6 +118,73 @@ def format_calendar_section(events: list) -> str:
         when_str = ev["when"].strftime("%a %d.%m %H:%M")
         lines.append(f"{impact_icon} {when_str} — {ev['title']}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------
+# ICS export (so the calendar can be subscribed to from a phone)
+# ---------------------------------------------------------------------
+
+ICS_OUTPUT_PATH = "docs/economic_calendar.ics"
+ICS_EVENT_DURATION_MINUTES = 30
+
+
+def _escape_ics_text(text: str) -> str:
+    return (
+        text.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
+
+
+def build_ics(events: list) -> str:
+    """
+    Builds an RFC 5545 .ics calendar feed from the week's events. Event
+    times are written in UTC (Z-suffix) — every calendar app converts
+    that to the viewing device's own timezone automatically, so this
+    works correctly regardless of what timezone the phone is set to.
+    """
+    now_utc = datetime.now(timezone.utc)
+    dtstamp = now_utc.strftime("%Y%m%dT%H%M%SZ")
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Weekly Market Prep//Economic Calendar//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "X-WR-CALNAME:Экономический календарь USD",
+        "REFRESH-INTERVAL;VALUE=DURATION:P1D",
+        "X-PUBLISHED-TTL:P1D",
+    ]
+
+    for i, ev in enumerate(events):
+        start_utc = ev["when"].astimezone(timezone.utc)
+        end_utc = start_utc + timedelta(minutes=ICS_EVENT_DURATION_MINUTES)
+        dtstart = start_utc.strftime("%Y%m%dT%H%M%SZ")
+        dtend = end_utc.strftime("%Y%m%dT%H%M%SZ")
+        uid = f"{dtstart}-{i}@weekly-market-prep"
+        summary = _escape_ics_text(f"{ev['impact']}: {ev['title']}")
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{dtstamp}",
+            f"DTSTART:{dtstart}",
+            f"DTEND:{dtend}",
+            f"SUMMARY:{summary}",
+            "END:VEVENT",
+        ]
+
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def write_ics_file(ics_text: str, path: str = ICS_OUTPUT_PATH) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(ics_text)
 
 
 # ---------------------------------------------------------------------
@@ -236,11 +305,10 @@ def format_levels_section(label: str, stats: dict, decimals: int) -> str:
 # Message assembly + sending
 # ---------------------------------------------------------------------
 
-def build_message() -> str:
+def build_message(calendar_events: list) -> str:
     today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
     lines = [f"\U0001F9ED Подготовка к неделе — {today} (UTC)\n"]
 
-    calendar_events = fetch_usd_calendar()
     lines.append(format_calendar_section(calendar_events))
     lines.append("")
 
@@ -277,7 +345,19 @@ def send_telegram_message(text: str) -> None:
 
 
 def main() -> None:
-    message = build_message()
+    calendar_events = fetch_usd_calendar()
+
+    # Publish the calendar as a subscribable .ics file (see README for how
+    # to point a phone's calendar app at it). This is independent of the
+    # Telegram message below — if writing the file fails for some reason,
+    # we still want the Telegram report to go out.
+    try:
+        ics_text = build_ics(calendar_events)
+        write_ics_file(ics_text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Warning: failed to write ICS calendar file: {exc}", file=sys.stderr)
+
+    message = build_message(calendar_events)
     send_telegram_message(message)
     print("Weekly market-prep report sent.")
 
