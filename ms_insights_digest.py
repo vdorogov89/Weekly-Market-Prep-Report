@@ -1,28 +1,26 @@
 """
-Morgan Stanley Insights digest -> Telegram bot.
+Morgan Stanley "Thoughts on the Market" podcast digest -> Telegram bot.
 
 This is a SEPARATE script/workflow from the others in this repo — sends
 its own message(s), on its own schedule, to the same Telegram bot.
 
 What this does:
-1. Fetches https://www.morganstanley.com/insights?filter=market-trends
-2. Finds article links and "Thoughts on the Market" podcast episode links
-   on that page.
-3. Compares them against a list of previously-seen URLs (state file,
-   committed back to the repo after each run) to find what's NEW since
-   the last run.
-4. For each new ARTICLE: sends the title + a Russian translation of the
-   one-sentence teaser that's shown on the listing page (that's all the
-   text available without visiting the article itself, and article pages
-   weren't verified to have a consistent scrapable structure).
-5. For each new PODCAST EPISODE: the listing page happens to include the
-   full episode transcript inline (visible even without JavaScript), so
-   this extracts it, produces a genuine extractive summary locally (no
-   AI, no paid API — a simple word-frequency sentence-scoring algorithm),
-   and translates that summary to Russian.
-6. On the very FIRST run (no state file yet), nothing is sent — the
-   current set of articles/episodes is just recorded as the baseline, so
-   the very next run only reports what's genuinely new after that point.
+1. Fetches https://www.morganstanley.com/insights/podcasts/thoughts-on-the-market
+   (the show's own page, which lists many recent episodes at once, each
+   with its date, title, teaser, and full transcript inline).
+2. Compares the episodes found against a list of previously-seen episode
+   URLs (state file, committed back to the repo after each run) to find
+   what's NEW since the last run.
+3. For each new episode: sends the full transcript to Claude (Anthropic's
+   API) with a single request that both summarizes AND translates it to
+   Russian in one step. This costs a small amount per call (see README)
+   — a local, free, non-AI extractive summary is used as an automatic
+   fallback if ANTHROPIC_API_KEY isn't set or the API call fails for any
+   reason, so the script still works (at lower summary quality) without
+   it.
+4. On the very FIRST run (no state file yet), nothing is sent — the
+   current set of episodes is just recorded as the baseline, so the very
+   next run only reports what's genuinely new after that point.
 
 Requirements (installed automatically by the GitHub Actions workflow):
     pip install requests beautifulsoup4
@@ -31,23 +29,30 @@ Environment variables required:
     TELEGRAM_BOT_TOKEN   - same one already used by the other scripts
     TELEGRAM_CHAT_ID     - same one already used by the other scripts
 
+Environment variable optional (enables real AI summaries):
+    ANTHROPIC_API_KEY    - from console.anthropic.com (paid, pay-per-use;
+                            see README for cost estimate). Without it,
+                            summaries fall back to the free local
+                            extractive-summary + MyMemory-translation
+                            pipeline (lower quality, but free).
+
 NOTE ON RELIABILITY (important — read if this stops working):
 - This page was reachable via a normal HTTP GET with a browser-like
   User-Agent at the time this was written, and did NOT require
-  JavaScript to render article/podcast links or podcast transcripts.
-  However, large corporate sites sometimes have bot-detection (Akamai,
-  PerimeterX, etc.) that blocks automated traffic from cloud/CI IP
-  ranges specifically — if that happens here, fetch_page() will raise
-  and the workflow log will show the HTTP status/response body to
-  confirm it.
-- The HTML-parsing logic in this file was written without being able to
-  inspect Morgan Stanley's live raw HTML from this environment (network
-  restrictions here), so it was built to be structure-tolerant (matching
-  by URL patterns and heading/paragraph relationships rather than exact
-  CSS classes) — but the FIRST live run should be treated as a
-  calibration run. If it finds 0 articles or 0 podcasts, check the log's
-  diagnostic counts and the raw page length; the parsing functions below
-  (find_articles / find_podcast_episodes) are where to adjust.
+  JavaScript to render episode links or transcripts. However, large
+  corporate sites sometimes have bot-detection (Akamai, PerimeterX,
+  etc.) that blocks automated traffic from cloud/CI IP ranges
+  specifically — if that happens here, fetch_page() will raise and the
+  workflow log will show the HTTP status/response body to confirm it.
+- The HTML-parsing logic in find_podcast_episodes() was validated
+  against a real fetch of the general /insights page (which uses the
+  same episode-card structure) and correctly separated episodes and
+  transcripts there. It has NOT been separately re-verified against
+  this specific podcast-hub page's raw HTML, since that wasn't
+  reachable from this environment either — so still treat the first
+  live run here as a calibration run. If it finds 0 episodes, check the
+  log's diagnostic page length, and if it finds episodes but empty
+  transcripts, that's the next thing to check.
 - Translation uses the free MyMemory API (no key), which has a modest
   daily character quota for anonymous use — comfortably enough for a
   handful of short summaries per day, which is all this needs.
@@ -65,10 +70,14 @@ from bs4 import BeautifulSoup
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
-PAGE_URL = "https://www.morganstanley.com/insights?filter=market-trends"
-STATE_FILE = "seen_insights.json"
-MAX_STATE_ENTRIES = 500  # keep the state file from growing forever
+CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
+CLAUDE_MODEL = "claude-sonnet-5"
+
+PAGE_URL = "https://www.morganstanley.com/insights/podcasts/thoughts-on-the-market"
+STATE_FILE = "seen_podcasts.json"
+MAX_STATE_ENTRIES = 200  # keep the state file from growing forever
 
 TRANSLATE_URL = "https://api.mymemory.translated.net/get"
 TRANSLATE_CHUNK_CHARS = 450  # stay safely under MyMemory's ~500 char/request limit
@@ -101,60 +110,10 @@ def fetch_page() -> str:
     resp = requests.get(PAGE_URL, headers=headers, timeout=30)
     if resp.status_code != 200:
         raise RuntimeError(
-            f"Unexpected status {resp.status_code} fetching insights page. "
+            f"Unexpected status {resp.status_code} fetching podcast page. "
             f"Response snippet: {resp.text[:300]}"
         )
     return resp.text
-
-
-# ---------------------------------------------------------------------
-# Parsing: articles
-# ---------------------------------------------------------------------
-
-ARTICLE_HREF_RE = re.compile(r"/insights/articles/[a-z0-9\-]+/?$", re.IGNORECASE)
-
-
-def find_articles(soup: BeautifulSoup) -> list:
-    """
-    Returns a list of {"url", "title", "teaser"} for each distinct
-    article link found on the page. "teaser" is the best-effort
-    one-sentence description shown near the title, or "" if none found.
-    """
-    by_href = {}
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if not ARTICLE_HREF_RE.search(href):
-            continue
-        full_url = href if href.startswith("http") else f"https://www.morganstanley.com{href}"
-        text = a.get_text(strip=True)
-        entry = by_href.setdefault(full_url, {"url": full_url, "title": "", "teaser": ""})
-        # Several <a> tags can point at the same article (an image link
-        # with no text, and a heading link with the real title) — keep
-        # the longest text seen as the title.
-        if len(text) > len(entry["title"]):
-            entry["title"] = text
-
-    # Best-effort teaser: for each article, look for a <p> immediately
-    # following the heading that contains its title link.
-    for entry in by_href.values():
-        if not entry["title"]:
-            continue
-        heading = None
-        for tag_name in ("h1", "h2", "h3", "h4"):
-            heading = soup.find(tag_name, string=lambda s: s and entry["title"] in s)
-            if heading is None:
-                # title text might be split across inline tags; search by link instead
-                link = soup.find("a", href=re.compile(re.escape(entry["url"].replace("https://www.morganstanley.com", ""))))
-                if link:
-                    heading = link.find_parent(["h1", "h2", "h3", "h4"])
-            if heading:
-                break
-        if heading:
-            sibling_p = heading.find_next_sibling("p")
-            if sibling_p:
-                entry["teaser"] = sibling_p.get_text(strip=True)
-
-    return [e for e in by_href.values() if e["title"]]
 
 
 # ---------------------------------------------------------------------
@@ -168,10 +127,10 @@ PODCAST_EPISODE_HREF_RE = re.compile(
 
 def find_podcast_episodes(soup: BeautifulSoup) -> list:
     """
-    Returns a list of {"url", "title", "date", "transcript"} for each
-    podcast episode found. Walks the page in document order so a
-    "Transcript" heading and the paragraphs that follow it are correctly
-    associated with the most recently seen episode title/link.
+    Returns a list of {"url", "title", "transcript"} for each podcast
+    episode found. Walks the page in document order so a "Transcript"
+    heading and the paragraphs that follow it are correctly associated
+    with the most recently seen episode title/link.
     """
     episodes = []
     current = None
@@ -226,7 +185,7 @@ def find_podcast_episodes(soup: BeautifulSoup) -> list:
 
 
 # ---------------------------------------------------------------------
-# Local extractive summarization (no AI, no external API)
+# Local extractive summarization (no AI, no external API — fallback only)
 # ---------------------------------------------------------------------
 
 def split_sentences(text: str) -> list:
@@ -276,7 +235,71 @@ def summarize(text: str, sentence_count: int = SUMMARY_SENTENCE_COUNT) -> str:
 
 
 # ---------------------------------------------------------------------
-# Translation (free, no key — MyMemory API)
+# AI summary via Claude API (optional — used when ANTHROPIC_API_KEY is set)
+# ---------------------------------------------------------------------
+
+def summarize_with_claude(title: str, transcript: str) -> str:
+    """
+    Sends the full transcript to Claude and asks for a structured,
+    ready-to-read Russian-language summary in one step (summary +
+    translation combined, rather than summarizing in English and
+    translating separately). Raises on any failure so the caller can
+    fall back to the free local pipeline.
+    """
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+
+    prompt = (
+        "Ниже — полная текстовая расшифровка эпизода финансового подкаста "
+        "Morgan Stanley \"Thoughts on the Market\". Сделай краткое содержание "
+        "на русском языке для личного дайджеста инвестора: по возможности "
+        "укажи имя и должность спикера (или спикеров), раздели по 2-4 "
+        "ключевым темам (с конкретными цифрами, датами и фактами из "
+        "транскрипта), и в конце добавь короткий вывод для инвестора. Пиши "
+        "по существу, без вступлений вроде \"вот краткое содержание\" — "
+        "сразу переходи к сути. Не более 200-250 слов.\n\n"
+        f"Название эпизода: {title}\n\n"
+        f"Транскрипт:\n{transcript}"
+    )
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": CLAUDE_MODEL,
+        "max_tokens": 800,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    resp = requests.post(CLAUDE_API_URL, headers=headers, json=payload, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Claude API error {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json()
+    text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
+    result = "\n".join(text_blocks).strip()
+    if not result:
+        raise RuntimeError(f"Claude API returned no text content: {str(data)[:300]}")
+    return result
+
+
+def summarize_podcast_to_russian(title: str, transcript: str) -> str:
+    """
+    Tries the Claude API first (better quality); falls back to the free
+    local extractive-summary + MyMemory translation pipeline if the key
+    isn't set or the API call fails for any reason.
+    """
+    try:
+        return summarize_with_claude(title, transcript)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Warning: Claude summary failed, falling back to local summary: {exc}", file=sys.stderr)
+        summary_en = summarize(transcript)
+        return translate_to_russian(summary_en)
+
+
+# ---------------------------------------------------------------------
+# Translation (free, no key — MyMemory API; used only as a fallback)
 # ---------------------------------------------------------------------
 
 def _translate_chunk(text: str) -> str:
@@ -319,7 +342,7 @@ def translate_to_russian(text: str) -> str:
 
 
 # ---------------------------------------------------------------------
-# State (seen URLs) persistence
+# State (seen episode URLs) persistence
 # ---------------------------------------------------------------------
 
 def load_seen_urls() -> set:
@@ -364,42 +387,27 @@ def main() -> None:
     html = fetch_page()
     soup = BeautifulSoup(html, "html.parser")
 
-    articles = find_articles(soup)
-    podcasts = find_podcast_episodes(soup)
+    episodes = find_podcast_episodes(soup)
+    print(f"Diagnostic: page length {len(html)} chars; found {len(episodes)} podcast episodes.")
 
-    print(f"Diagnostic: page length {len(html)} chars; found {len(articles)} articles, {len(podcasts)} podcast episodes.")
-
-    all_urls = {a["url"] for a in articles} | {p["url"] for p in podcasts}
+    all_urls = {e["url"] for e in episodes}
     seen = load_seen_urls()
 
     if seen is None:
-        print("No state file found — this is the first run. Recording current items as baseline, sending nothing.")
+        print("No state file found — this is the first run. Recording current episodes as baseline, sending nothing.")
         save_seen_urls(all_urls)
         return
 
-    new_articles = [a for a in articles if a["url"] not in seen]
-    new_podcasts = [p for p in podcasts if p["url"] not in seen]
+    new_episodes = [e for e in episodes if e["url"] not in seen]
 
-    if not new_articles and not new_podcasts:
-        print("No new items since last run.")
+    if not new_episodes:
+        print("No new episodes since last run.")
         save_seen_urls(seen | all_urls)
         return
 
-    for article in new_articles:
-        teaser_ru = translate_to_russian(article["teaser"]) if article["teaser"] else ""
-        message = f"\U0001F4F0 Новая статья — Morgan Stanley Insights\n\n*{article['title']}*\n"
-        if teaser_ru:
-            message += f"\n{teaser_ru}\n"
-        message += f"\n{article['url']}"
-        try:
-            send_telegram_message(message)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Warning: failed to send Telegram message for article {article['url']}: {exc}", file=sys.stderr)
-
-    for episode in new_podcasts:
+    for episode in new_episodes:
         if episode["transcript"]:
-            summary_en = summarize(episode["transcript"])
-            summary_ru = translate_to_russian(summary_en)
+            summary_ru = summarize_podcast_to_russian(episode["title"], episode["transcript"])
         else:
             summary_ru = "(транскрипт не найден на странице — см. эпизод по ссылке)"
         message = (
@@ -413,7 +421,7 @@ def main() -> None:
             print(f"Warning: failed to send Telegram message for episode {episode['url']}: {exc}", file=sys.stderr)
 
     save_seen_urls(seen | all_urls)
-    print(f"Sent {len(new_articles)} new article(s) and {len(new_podcasts)} new podcast episode(s).")
+    print(f"Sent {len(new_episodes)} new podcast episode(s).")
 
 
 if __name__ == "__main__":
