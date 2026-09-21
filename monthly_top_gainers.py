@@ -16,10 +16,11 @@ What this does:
    via Twelve Data's time_series endpoint — same TWELVE_DATA_API_KEY
    already used by weekly_market_prep.py, no new key needed. The free
    plan's real constraint is 8 API CREDITS per minute (not "8 requests"
-   as the marketing copy suggests) and each symbol costs 1 credit, so
-   this fetches only 8 symbols per call with a ~65s pause between calls.
-   For the full S&P 500 list (~500 symbols) that takes roughly an hour
-   end to end — expected and fine for a job that runs once a month.
+   as the marketing copy suggests) and each symbol costs 1 credit; this
+   fetches only 6 symbols per call (leaving headroom below the 8/minute
+   cap) with a 75s pause and escalating backoff on any 429s. For the
+   full S&P 500 list (~500 symbols) that takes roughly 1.5-2 hours end
+   to end — expected and fine for a job that runs once a month.
 4. Computes each stock's % price change over that window and sends the
    top 10 gainers to Telegram.
 
@@ -35,11 +36,16 @@ NOTE ON RELIABILITY:
 - The S&P 500 list is a widely-used, actively maintained free dataset
   (github.com/datasets/s-and-p-500-companies). If that repo ever moves,
   SP500_LIST_URL below will need updating.
-- Twelve Data's free Basic plan is 8 API credits/minute, 800/day (each
-  symbol in a request costs 1 credit). Fetching ~500 S&P 500 stocks at
-  8 symbols/minute takes about an hour and uses ~500 of the 800 daily
-  credits — comfortably inside the daily cap, run once a month. The
-  ~hour runtime is normal for this script, not a sign anything is stuck.
+- Twelve Data's free Basic plan is documented as 8 API credits/minute,
+  800/day (each symbol in a request costs 1 credit) — but in practice
+  the per-minute window can throttle even at exactly 8/8 credits with a
+  65s gap (no headroom, and the window isn't perfectly aligned with our
+  own timing). This script uses 6 symbols/batch with a 75s gap and
+  escalating backoff (75s/120s/180s) on repeated 429s, which costs more
+  runtime (~1.5-2 hours for ~500 stocks) but is far more reliable. The
+  long runtime is normal for this script, not a sign anything is stuck —
+  check the log for "Rate limited" / "Waiting Ns and retrying" lines to
+  see it progressing.
 - This report only makes sense for a stock that had price data for the
   entire 3-month window and still trades under the same ticker; stocks
   that were added/removed/renamed partway through are simply skipped
@@ -71,10 +77,13 @@ WINDOW_MONTHS = 3
 # real constraint is the free plan's rate limit: 8 API CREDITS per minute
 # (each symbol in a call costs 1 credit), 800/day. A batch of 100 symbols
 # would request 100 credits at once and immediately hit that per-minute
-# cap — so batches here are capped at the per-minute credit limit itself,
-# with a pause between batches to let the credit window refill.
-BATCH_SIZE = 8
-BATCH_DELAY_SECONDS = 65  # a little over a minute, so the credit window has reset
+# cap. Even at exactly 8 symbols/batch with a 65s gap, the free plan can
+# still throttle intermittently (the per-minute window isn't perfectly
+# aligned with our own timing, and there's zero headroom at exactly 8/8
+# credits) — so this uses a smaller batch with real headroom, a longer
+# gap, and escalating backoff on repeated 429s.
+BATCH_SIZE = 6
+BATCH_DELAY_SECONDS = 75  # comfortably over a minute, with headroom below the 8-credit cap
 TOP_N = 10
 
 
@@ -133,12 +142,13 @@ def chunked(items: list, size: int):
         yield items[i:i + size]
 
 
-def _fetch_batch_with_retry(batch: list, start_date: date, end_date: date, max_retries: int = 2) -> dict:
+def _fetch_batch_with_retry(batch: list, start_date: date, end_date: date, max_retries: int = 3) -> dict:
     """
-    Fetches one batch, retrying on a 429 (rate limit) after waiting out
-    the per-minute credit window again — timing can drift slightly from
-    Twelve Data's own internal minute boundary, so a single retry adds
-    robustness without much extra runtime.
+    Fetches one batch, retrying on a 429 (rate limit) with an escalating
+    wait (75s, 120s, 180s) — the free plan's per-minute window can be
+    stricter in practice than the documented 8 credits/minute, so this
+    gives increasing headroom on repeated failures rather than retrying
+    at a fixed interval that keeps landing in the same throttled window.
     """
     params = {
         "symbol": ",".join(batch),
@@ -147,11 +157,19 @@ def _fetch_batch_with_retry(batch: list, start_date: date, end_date: date, max_r
         "end_date": end_date.isoformat(),
         "apikey": TWELVE_DATA_KEY,
     }
+    backoffs = [75, 120, 180]
     for attempt in range(max_retries + 1):
         resp = requests.get(TWELVE_DATA_URL, params=params, timeout=60)
         if resp.status_code == 429 and attempt < max_retries:
-            print(f"Rate limited, waiting {BATCH_DELAY_SECONDS}s and retrying...", file=sys.stderr)
-            time.sleep(BATCH_DELAY_SECONDS)
+            wait_seconds = backoffs[min(attempt, len(backoffs) - 1)]
+            # Print the response body once, on the first failure, so the
+            # exact reason from Twelve Data (daily cap vs per-minute vs
+            # something else) is visible in the workflow log if this
+            # keeps happening.
+            if attempt == 0:
+                print(f"Rate limited (429). Response: {resp.text[:300]}", file=sys.stderr)
+            print(f"Waiting {wait_seconds}s and retrying...", file=sys.stderr)
+            time.sleep(wait_seconds)
             continue
         resp.raise_for_status()
         return resp.json()
