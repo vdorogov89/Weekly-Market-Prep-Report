@@ -1,0 +1,43 @@
+name: Morgan Stanley Insights Digest
+
+on:
+  schedule:
+    # Runs once a day at 08:00 UTC, checking for new articles/podcast
+    # episodes since the last run.
+    - cron: '0 8 * * *'
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab to test
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit the "seen URLs" state file back
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run Morgan Stanley insights digest script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python ms_insights_digest.py
+
+      - name: Save "seen URLs" state back to the repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_insights.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update seen_insights.json"
+            git push
+          else
+            echo "No change to seen_insights.json — nothing to commit."
+          fi
