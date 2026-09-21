@@ -13,9 +13,13 @@ What this does:
    boundaries) — so every month's report reflects "the last 3 months",
    updated monthly.
 3. Fetches each stock's close price at the start and end of that window
-   via Twelve Data's batch time_series endpoint (up to 120 symbols per
-   API call, so ~500 stocks only takes ~5 calls) — same TWELVE_DATA_API_KEY
-   already used by weekly_market_prep.py, no new key needed.
+   via Twelve Data's time_series endpoint — same TWELVE_DATA_API_KEY
+   already used by weekly_market_prep.py, no new key needed. The free
+   plan's real constraint is 8 API CREDITS per minute (not "8 requests"
+   as the marketing copy suggests) and each symbol costs 1 credit, so
+   this fetches only 8 symbols per call with a ~65s pause between calls.
+   For the full S&P 500 list (~500 symbols) that takes roughly an hour
+   end to end — expected and fine for a job that runs once a month.
 4. Computes each stock's % price change over that window and sends the
    top 10 gainers to Telegram.
 
@@ -31,10 +35,11 @@ NOTE ON RELIABILITY:
 - The S&P 500 list is a widely-used, actively maintained free dataset
   (github.com/datasets/s-and-p-500-companies). If that repo ever moves,
   SP500_LIST_URL below will need updating.
-- Twelve Data's free tier is 800 credits/day, 8 requests/minute. A batch
-  call of N symbols costs N credits but is still just 1 HTTP request, so
-  ~500 stocks costs ~500 credits across ~5 requests — comfortably inside
-  the free daily limit, run once a month.
+- Twelve Data's free Basic plan is 8 API credits/minute, 800/day (each
+  symbol in a request costs 1 credit). Fetching ~500 S&P 500 stocks at
+  8 symbols/minute takes about an hour and uses ~500 of the 800 daily
+  credits — comfortably inside the daily cap, run once a month. The
+  ~hour runtime is normal for this script, not a sign anything is stuck.
 - This report only makes sense for a stock that had price data for the
   entire 3-month window and still trades under the same ticker; stocks
   that were added/removed/renamed partway through are simply skipped
@@ -62,8 +67,14 @@ SP500_LIST_URL = (
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 
 WINDOW_MONTHS = 3
-BATCH_SIZE = 100  # Twelve Data allows up to 120 symbols per batch call
-BATCH_DELAY_SECONDS = 8  # stay comfortably under the 8 requests/minute free limit
+# Twelve Data's free Basic plan allows 120 symbols per batch call, but the
+# real constraint is the free plan's rate limit: 8 API CREDITS per minute
+# (each symbol in a call costs 1 credit), 800/day. A batch of 100 symbols
+# would request 100 credits at once and immediately hit that per-minute
+# cap — so batches here are capped at the per-minute credit limit itself,
+# with a pause between batches to let the credit window refill.
+BATCH_SIZE = 8
+BATCH_DELAY_SECONDS = 65  # a little over a minute, so the credit window has reset
 TOP_N = 10
 
 
@@ -122,12 +133,42 @@ def chunked(items: list, size: int):
         yield items[i:i + size]
 
 
+def _fetch_batch_with_retry(batch: list, start_date: date, end_date: date, max_retries: int = 2) -> dict:
+    """
+    Fetches one batch, retrying on a 429 (rate limit) after waiting out
+    the per-minute credit window again — timing can drift slightly from
+    Twelve Data's own internal minute boundary, so a single retry adds
+    robustness without much extra runtime.
+    """
+    params = {
+        "symbol": ",".join(batch),
+        "interval": "1day",
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "apikey": TWELVE_DATA_KEY,
+    }
+    for attempt in range(max_retries + 1):
+        resp = requests.get(TWELVE_DATA_URL, params=params, timeout=60)
+        if resp.status_code == 429 and attempt < max_retries:
+            print(f"Rate limited, waiting {BATCH_DELAY_SECONDS}s and retrying...", file=sys.stderr)
+            time.sleep(BATCH_DELAY_SECONDS)
+            continue
+        resp.raise_for_status()
+        return resp.json()
+    return {}
+
+
 def fetch_window_returns(symbols: list, start_date: date, end_date: date) -> dict:
     """
     Returns {symbol: pct_change} for every symbol that had usable price
     data for both the start and end of the window. Symbols with missing
     or unusable data are silently omitted (not an error — e.g. a stock
     added to the index partway through the window).
+
+    Runs at BATCH_SIZE symbols per call with a BATCH_DELAY_SECONDS pause
+    between calls (see the constants above for why) — for the full S&P
+    500 list this takes roughly an hour end to end, which is expected
+    and fine for a job that only runs once a month.
     """
     if not TWELVE_DATA_KEY:
         raise RuntimeError("TWELVE_DATA_API_KEY is not set.")
@@ -139,17 +180,8 @@ def fetch_window_returns(symbols: list, start_date: date, end_date: date) -> dic
         if i > 0:
             time.sleep(BATCH_DELAY_SECONDS)
 
-        params = {
-            "symbol": ",".join(batch),
-            "interval": "1day",
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "apikey": TWELVE_DATA_KEY,
-        }
         try:
-            resp = requests.get(TWELVE_DATA_URL, params=params, timeout=60)
-            resp.raise_for_status()
-            data = resp.json()
+            data = _fetch_batch_with_retry(batch, start_date, end_date)
         except Exception as exc:  # noqa: BLE001
             print(f"Warning: batch {i+1}/{len(batches)} request failed: {exc}", file=sys.stderr)
             continue
