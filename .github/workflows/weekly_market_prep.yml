@@ -10,6 +10,8 @@ on:
 jobs:
   send-report:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit the published .ics calendar file
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -28,3 +30,15 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
         run: python weekly_market_prep.py
+
+      - name: Publish updated .ics calendar file
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/economic_calendar.ics
+          if ! git diff --cached --quiet; then
+            git commit -m "Update economic_calendar.ics"
+            git push
+          else
+            echo "No change to economic_calendar.ics — nothing to commit."
+          fi
