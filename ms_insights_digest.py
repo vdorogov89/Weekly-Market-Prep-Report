@@ -269,7 +269,7 @@ def summarize_with_claude(title: str, transcript: str) -> str:
     }
     payload = {
         "model": CLAUDE_MODEL,
-        "max_tokens": 800,
+        "max_tokens": 1500,
         "messages": [{"role": "user", "content": prompt}],
     }
     resp = requests.post(CLAUDE_API_URL, headers=headers, json=payload, timeout=60)
