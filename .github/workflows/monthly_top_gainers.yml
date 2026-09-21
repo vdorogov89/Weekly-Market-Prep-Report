@@ -10,7 +10,7 @@ on:
 jobs:
   send-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 90   # the full S&P 500 pull takes ~1 hour by design; this is a safety cap
+    timeout-minutes: 150   # the full S&P 500 pull now takes ~1.5-2 hours by design; this is a safety cap
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
