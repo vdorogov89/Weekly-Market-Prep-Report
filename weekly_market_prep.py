@@ -39,6 +39,7 @@ import os
 import statistics
 import sys
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from dateutil import parser as date_parser
@@ -49,6 +50,13 @@ TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+# The Forex Factory feed's "date" field is not always explicit about its
+# timezone; when a parsed timestamp comes back with no tzinfo, we assume
+# it's US Eastern time (the feed's long-standing convention) before
+# converting to Moscow time.
+CALENDAR_SOURCE_TZ_FALLBACK = ZoneInfo("America/New_York")
 
 # label -> Twelve Data symbol
 INSTRUMENTS = {
@@ -66,8 +74,9 @@ WEEKS_FOR_AVERAGE = 8
 def fetch_usd_calendar() -> list:
     """
     Returns a list of {"title", "when", "impact"} dicts for this week's
-    USD High/Medium impact events, sorted by time. Returns [] (with a
-    warning printed) if the feed can't be fetched or parsed.
+    USD High/Medium impact events, "when" converted to Moscow time and
+    sorted chronologically. Returns [] (with a warning printed) if the
+    feed can't be fetched or parsed.
     """
     headers = {"User-Agent": "Mozilla/5.0 (compatible; WeeklyPrepBot/1.0)"}
     try:
@@ -86,7 +95,10 @@ def fetch_usd_calendar() -> list:
             if e.get("impact") not in ("High", "Medium"):
                 continue
             when = date_parser.parse(e["date"])
-            events.append({"title": e.get("title", "?"), "when": when, "impact": e["impact"]})
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=CALENDAR_SOURCE_TZ_FALLBACK)
+            when_msk = when.astimezone(MOSCOW_TZ)
+            events.append({"title": e.get("title", "?"), "when": when_msk, "impact": e["impact"]})
         except Exception:  # noqa: BLE001
             continue  # skip malformed rows rather than failing the whole feed
 
@@ -98,7 +110,7 @@ def format_calendar_section(events: list) -> str:
     if not events:
         return "Экономический календарь (USD): нет данных или на этой неделе нет важных событий."
 
-    lines = ["\U0001F5D3 Экономический календарь (USD, High/Medium impact):"]
+    lines = ["\U0001F5D3 Экономический календарь (USD, High/Medium impact, время МСК):"]
     for ev in events:
         impact_icon = "\U0001F534" if ev["impact"] == "High" else "\U0001F7E1"
         when_str = ev["when"].strftime("%a %d.%m %H:%M")
