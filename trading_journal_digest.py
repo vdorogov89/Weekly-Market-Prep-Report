@@ -8,22 +8,30 @@ What this does:
 1. Downloads your trading journal as CSV from a Google Sheet (published
    via a plain "anyone with the link can view" share, exported as CSV —
    no Google API key or OAuth needed, see README for setup).
-2. Filters rows to the previous calendar month.
+2. Filters rows to trades CLOSED in the previous calendar month (by
+   Close_Date — that's when a trade's result is realized).
 3. Computes win rate and average R broken down by: overall, instrument,
    day of week, rule-based vs discretionary, CFTC-consensus-aligned vs
-   not, and by setup tag (only tags with enough samples to mean
-   anything).
+   not, setup tag, and holding period (intraday / swing / position).
 4. Sends a Russian-language summary to Telegram — no AI involved, this
    is plain arithmetic on your own data.
 
 Expected Google Sheet columns (header row, in this order or any order —
 matched by name, not position):
-    Date | Instrument | Direction | Result_R | Rule_Based | CFTC_Aligned | Setup | Notes
+    Open_Date | Close_Date | Instrument | Direction | Open_Price | Close_Price | Result_R | Rule_Based | CFTC_Aligned | Setup | Notes
 
-    Date          - YYYY-MM-DD (or most common date formats)
+    Open_Date     - date you entered the trade, YYYY-MM-DD (or common formats)
+    Close_Date    - date you closed the trade, same format. Required —
+                    this is what "last month" filtering uses, and it's
+                    also what makes a specific trade findable later when
+                    you ask about it (Claude can locate it by date/price
+                    instead of having to guess which trade you mean).
     Instrument    - e.g. EURUSD, XAUUSD (free text)
-    Direction     - Long / Short (not currently used in stats, but kept
-                    for your own reference)
+    Direction     - Long / Short (for reference, not used in stats)
+    Open_Price    - price you entered at (optional but recommended — lets
+                    a specific trade be cross-checked against real price
+                    history later, e.g. via the weekly range/levels report)
+    Close_Price   - price you exited at (same as above, optional)
     Result_R      - numeric: your result in R-multiples (or % — just be
                     consistent). Positive = win, negative = loss, 0 = BE.
     Rule_Based    - Да / Нет (was this a planned, system trade)
@@ -82,37 +90,63 @@ def fetch_journal_rows() -> list:
     rows = []
     for raw in reader:
         row = {(k or "").strip(): (v or "").strip() for k, v in raw.items()}
-        if not row.get("Date"):
+
+        if not row.get("Close_Date"):
             continue
-        parsed_date = _parse_date(row["Date"])
-        if parsed_date is None:
-            print(f"Warning: skipping row with unparseable date: {row.get('Date')!r}", file=sys.stderr)
+        close_date = _parse_date(row["Close_Date"])
+        if close_date is None:
+            print(f"Warning: skipping row with unparseable Close_Date: {row.get('Close_Date')!r}", file=sys.stderr)
             continue
+
+        open_date = _parse_date(row["Open_Date"]) if row.get("Open_Date") else None
+
         try:
             result_r = float(row.get("Result_R", "").replace(",", "."))
         except ValueError:
             print(f"Warning: skipping row with unparseable Result_R: {row.get('Result_R')!r}", file=sys.stderr)
             continue
 
+        open_price = _parse_float(row.get("Open_Price", ""))
+        close_price = _parse_float(row.get("Close_Price", ""))
+
+        holding_days = (close_date - open_date).days if open_date else None
+
         rows.append({
-            "date": parsed_date,
+            "open_date": open_date,
+            "close_date": close_date,
             "instrument": row.get("Instrument", "").strip() or "?",
             "direction": row.get("Direction", "").strip(),
+            "open_price": open_price,
+            "close_price": close_price,
             "result_r": result_r,
             "rule_based": row.get("Rule_Based", "").strip().lower(),
             "cftc_aligned": row.get("CFTC_Aligned", "").strip().lower(),
             "setup": row.get("Setup", "").strip() or "(без тега)",
+            "holding_days": holding_days,
         })
     return rows
 
 
 def _parse_date(text: str):
+    text = (text or "").strip()
+    if not text:
+        return None
     for fmt in DATE_FORMATS:
         try:
             return datetime.strptime(text, fmt).date()
         except ValueError:
             continue
     return None
+
+
+def _parse_float(text: str):
+    text = (text or "").strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------
@@ -145,6 +179,14 @@ def compute_breakdown(trades: list, key_func) -> dict:
 RUSSIAN_WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 
 
+def holding_bucket(days: int) -> str:
+    if days <= 0:
+        return "Внутри дня"
+    if days <= 5:
+        return "Свинг (1-5 дн.)"
+    return "Позиционная (6+ дн.)"
+
+
 # ---------------------------------------------------------------------
 # Message formatting
 # ---------------------------------------------------------------------
@@ -164,7 +206,7 @@ def build_message(trades: list, period_start: date, period_end: date) -> str:
     lines = [f"\U0001F4D2 Статистика дневника трейдера за период {period_label}\n"]
 
     if not trades:
-        lines.append("За этот период сделок в таблице не найдено.")
+        lines.append("За этот период закрытых сделок в таблице не найдено.")
         return "\n".join(lines)
 
     overall = _bucket_stats(trades)
@@ -182,8 +224,8 @@ def build_message(trades: list, period_start: date, period_end: date) -> str:
         lines.append(fmt_bucket(instrument, stats))
     lines.append("")
 
-    lines.append("\U0001F4C5 По дням недели:")
-    by_weekday = compute_breakdown(trades, lambda t: RUSSIAN_WEEKDAYS[t["date"].weekday()])
+    lines.append("\U0001F4C5 По дням недели (закрытия сделки):")
+    by_weekday = compute_breakdown(trades, lambda t: RUSSIAN_WEEKDAYS[t["close_date"].weekday()])
     for wd in RUSSIAN_WEEKDAYS:
         if wd in by_weekday:
             lines.append(fmt_bucket(wd, by_weekday[wd]))
@@ -203,6 +245,15 @@ def build_message(trades: list, period_start: date, period_end: date) -> str:
         for label in ("Совпадало", "Не совпадало"):
             if label in by_cftc:
                 lines.append(fmt_bucket(label, by_cftc[label]))
+        lines.append("")
+
+    duration_trades = [t for t in trades if t["holding_days"] is not None]
+    if duration_trades:
+        lines.append("\u23F1 По длительности сделки:")
+        by_duration = compute_breakdown(duration_trades, lambda t: holding_bucket(t["holding_days"]))
+        for label in ("Внутри дня", "Свинг (1-5 дн.)", "Позиционная (6+ дн.)"):
+            if label in by_duration:
+                lines.append(fmt_bucket(label, by_duration[label]))
         lines.append("")
 
     lines.append("\U0001F3F7 По тегам сетапа:")
@@ -248,9 +299,9 @@ def main() -> None:
     period_start, period_end = previous_month_bounds(today)
 
     all_rows = fetch_journal_rows()
-    trades = [r for r in all_rows if period_start <= r["date"] <= period_end]
+    trades = [r for r in all_rows if period_start <= r["close_date"] <= period_end]
 
-    print(f"Diagnostic: {len(all_rows)} total rows in sheet, {len(trades)} trades in {period_start}..{period_end}.")
+    print(f"Diagnostic: {len(all_rows)} total rows in sheet, {len(trades)} trades closed in {period_start}..{period_end}.")
 
     message = build_message(trades, period_start, period_end)
     send_telegram_message(message)
