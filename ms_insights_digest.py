@@ -373,6 +373,15 @@ def send_telegram_message(text: str) -> None:
             "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set. "
             "Set them as GitHub repo secrets (see README)."
         )
+    # Telegram rejects any message over 4096 characters outright — an
+    # AI summary occasionally runs long enough to cross that with the
+    # title/URL added. Truncate defensively rather than let the whole
+    # send fail (which, upstream, must never silently mark the episode
+    # as "seen" — see main()).
+    max_len = 4096
+    if len(text) > max_len:
+        text = text[: max_len - 20].rstrip() + "\n…(обрезано)"
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text}
     resp = requests.post(url, data=payload, timeout=20)
@@ -405,6 +414,7 @@ def main() -> None:
         save_seen_urls(seen | all_urls)
         return
 
+    successfully_sent = set()
     for episode in new_episodes:
         if episode["transcript"]:
             summary_ru = summarize_podcast_to_russian(episode["title"], episode["transcript"])
@@ -417,11 +427,19 @@ def main() -> None:
         )
         try:
             send_telegram_message(message)
+            successfully_sent.add(episode["url"])
         except Exception as exc:  # noqa: BLE001
             print(f"Warning: failed to send Telegram message for episode {episode['url']}: {exc}", file=sys.stderr)
+            print(f"  -> {episode['url']} will NOT be marked as seen, so it will be retried on the next run.", file=sys.stderr)
 
-    save_seen_urls(seen | all_urls)
-    print(f"Sent {len(new_episodes)} new podcast episode(s).")
+    # Only mark episodes as "seen" if we actually managed to send them —
+    # anything that failed to send stays out of the seen set so it's
+    # retried on the next run instead of silently disappearing forever.
+    failed_urls = {e["url"] for e in new_episodes} - successfully_sent
+    save_seen_urls((seen | all_urls) - failed_urls)
+    print(f"Sent {len(successfully_sent)}/{len(new_episodes)} new podcast episode(s).")
+    if failed_urls:
+        print(f"{len(failed_urls)} episode(s) failed to send and will be retried next run: {failed_urls}", file=sys.stderr)
 
 
 if __name__ == "__main__":
