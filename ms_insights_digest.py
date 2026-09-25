@@ -398,6 +398,11 @@ def main() -> None:
 
     episodes = find_podcast_episodes(soup)
     print(f"Diagnostic: page length {len(html)} chars; found {len(episodes)} podcast episodes.")
+    if episodes:
+        print("Diagnostic: 5 most recently listed episodes on the page (page order, newest first):")
+        for e in episodes[:5]:
+            has_transcript = "yes" if e["transcript"] else "NO TRANSCRIPT"
+            print(f"  - {e['title']!r} ({e['url']}) [transcript: {has_transcript}]")
 
     all_urls = {e["url"] for e in episodes}
     seen = load_seen_urls()
