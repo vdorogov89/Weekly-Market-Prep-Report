@@ -2,9 +2,11 @@ name: Morgan Stanley Podcast Digest
 
 on:
   schedule:
-    # Runs once a day at 08:00 UTC, checking for new podcast episodes
-    # since the last run.
-    - cron: '0 8 * * *'
+    # Runs once a day at 18:00 UTC (~2pm US Eastern) — episodes on this
+    # page have historically published sometime between ~9am and ~2pm
+    # Eastern, so checking at 08:00 UTC (~4am Eastern) was consistently
+    # a day behind. 18:00 UTC gives same-day episodes time to appear.
+    - cron: '0 18 * * *'
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab to test
 
 jobs:
