@@ -249,7 +249,12 @@ def summarize_with_claude(title: str, transcript: str) -> str:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
 
+    today_str = datetime.now(timezone.utc).strftime("%d.%m.%Y")
     prompt = (
+        f"Сегодняшняя дата: {today_str}. Используй её как точку отсчёта для "
+        "любых относительных упоминаний времени в тексте ниже (\"в следующем "
+        "году\", \"позже в этом году\", \"на прошлой неделе\" и т.п.) — не "
+        "полагайся на собственные предположения о том, какой сейчас год.\n\n"
         "Ниже — полная текстовая расшифровка эпизода финансового подкаста "
         "Morgan Stanley \"Thoughts on the Market\". Сделай краткое содержание "
         "на русском языке для личного дайджеста инвестора: по возможности "
