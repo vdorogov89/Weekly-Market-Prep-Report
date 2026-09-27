@@ -1,0 +1,45 @@
+name: Calendar Event Reminders
+
+on:
+  schedule:
+    # Every 30 minutes. Paired with the 30-60 minute reminder window in
+    # the script, this both absorbs GitHub's documented scheduling
+    # jitter and keeps this workflow's Actions-minutes usage far lower
+    # than a 5-10 minute interval would (see README for the math).
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab to test
+
+jobs:
+  send-reminders:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit the "already reminded" state file back
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests python-dateutil tzdata
+
+      - name: Run calendar reminders script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python calendar_reminders.py
+
+      - name: Save "reminded events" state back to the repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reminded_events.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update reminded_events.json"
+            git push
+          else
+            echo "No change to reminded_events.json — nothing to commit."
+          fi
