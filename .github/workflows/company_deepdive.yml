@@ -1,0 +1,45 @@
+name: Company Deep Dive
+
+on:
+  schedule:
+    # Runs once a day at 09:00 UTC. Most days of the month this does
+    # nothing (only the 10 days following the monthly top-10 report are
+    # "due" — see company_deepdive.py), which is expected, not an error.
+    - cron: '0 9 * * *'
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab to test
+
+jobs:
+  send-deepdive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit the "already sent" state file back
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run company deep-dive script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python company_deepdive.py
+
+      - name: Save "already sent" state back to the repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add deepdive_sent_state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update deepdive_sent_state.json"
+            git push
+          else
+            echo "No change to deepdive_sent_state.json — nothing to commit."
+          fi

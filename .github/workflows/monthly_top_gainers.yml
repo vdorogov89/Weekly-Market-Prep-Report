@@ -11,6 +11,8 @@ jobs:
   send-report:
     runs-on: ubuntu-latest
     timeout-minutes: 150   # the full S&P 500 pull now takes ~1.5-2 hours by design; this is a safety cap
+    permissions:
+      contents: write   # needed to commit top10_companies.json back for company_deepdive.py
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -29,3 +31,15 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
         run: python monthly_top_gainers.py
+
+      - name: Save top10_companies.json back to the repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add top10_companies.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update top10_companies.json"
+            git push
+          else
+            echo "No change to top10_companies.json — nothing to commit."
+          fi
