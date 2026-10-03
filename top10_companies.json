@@ -5,63 +5,63 @@
   "companies": [
     {
       "rank": 1,
-      "symbol": "MRNA",
-      "name": "Moderna",
-      "pct_change": 136.8856569709127
+      "symbol": "MSFT",
+      "name": "Microsoft",
+      "pct_change": 31.322185749242905
     },
     {
       "rank": 2,
-      "symbol": "P",
-      "name": "Everpure",
-      "pct_change": 84.47256223353048
+      "symbol": "CVX",
+      "name": "Chevron",
+      "pct_change": 22.399533096926728
     },
     {
       "rank": 3,
-      "symbol": "MPC",
-      "name": "Marathon Petroleum",
-      "pct_change": 57.743560813082006
+      "symbol": "XOM",
+      "name": "Exxon Mobil",
+      "pct_change": 19.49815068927421
     },
     {
       "rank": 4,
-      "symbol": "HPE",
-      "name": "Hewlett Packard Enterprise",
-      "pct_change": 56.633519282076165
+      "symbol": "PFE",
+      "name": "Pfizer",
+      "pct_change": 15.625
     },
     {
       "rank": 5,
-      "symbol": "ACN",
-      "name": "Accenture",
-      "pct_change": 54.56860905943874
+      "symbol": "FCX",
+      "name": "Freeport-McMoRan",
+      "pct_change": 13.6296539281614
     },
     {
       "rank": 6,
-      "symbol": "SMCI",
-      "name": "Supermicro",
-      "pct_change": 54.00440852314476
+      "symbol": "AAPL",
+      "name": "Apple",
+      "pct_change": 7.027835920033709
     },
     {
       "rank": 7,
-      "symbol": "VLO",
-      "name": "Valero Energy",
-      "pct_change": 52.54704763418554
+      "symbol": "KO",
+      "name": "Coca-Cola",
+      "pct_change": 2.3294485381506913
     },
     {
       "rank": 8,
-      "symbol": "PSX",
-      "name": "Phillips 66",
-      "pct_change": 49.77327400521483
+      "symbol": "JPM",
+      "name": "JPMorgan Chase",
+      "pct_change": -0.3856878045863765
     },
     {
       "rank": 9,
-      "symbol": "PLTR",
-      "name": "Palantir Technologies",
-      "pct_change": 46.976019334880114
+      "symbol": "JNJ",
+      "name": "Johnson & Johnson",
+      "pct_change": -1.6651493499606596
     },
     {
       "rank": 10,
-      "symbol": "HPQ",
-      "name": "HP Inc.",
-      "pct_change": 46.60282717738258
+      "symbol": "AMT",
+      "name": "American Tower",
+      "pct_change": -2.9934355417300162
     }
   ]
 }
