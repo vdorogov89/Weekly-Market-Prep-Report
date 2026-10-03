@@ -7,22 +7,19 @@ its own schedule, to the same Telegram bot. Nothing in the other two
 scripts is touched.
 
 What this does:
-1. Downloads the current S&P 500 ticker list from a free, static public
-   GitHub dataset (no key needed).
+1. Uses a fixed WATCHLIST of tickers (defined below — NOT the full S&P
+   500 anymore; edit WATCHLIST directly to change which stocks are
+   considered).
 2. Uses a ROLLING 3-month window ending yesterday (not calendar-quarter
    boundaries) — so every month's report reflects "the last 3 months",
    updated monthly.
 3. Fetches each stock's close price at the start and end of that window
    via Twelve Data's time_series endpoint — same TWELVE_DATA_API_KEY
-   already used by weekly_market_prep.py, no new key needed. The free
-   plan's real constraint is 8 API CREDITS per minute (not "8 requests"
-   as the marketing copy suggests) and each symbol costs 1 credit; this
-   fetches only 6 symbols per call (leaving headroom below the 8/minute
-   cap) with a 75s pause and escalating backoff on any 429s. For the
-   full S&P 500 list (~500 symbols) that takes roughly 1.5-2 hours end
-   to end — expected and fine for a job that runs once a month.
+   already used by weekly_market_prep.py, no new key needed. With a
+   watchlist this small (vs. the full S&P 500 previously), the whole
+   run takes a few minutes, not hours.
 4. Computes each stock's % price change over that window and sends the
-   top 10 gainers to Telegram.
+   top (up to TOP_N) gainers, ranked, to Telegram.
 
 Requirements (installed automatically by the GitHub Actions workflow):
     pip install requests python-dateutil
@@ -33,27 +30,20 @@ Environment variables required:
     TWELVE_DATA_API_KEY   - same one already used by weekly_market_prep.py
 
 NOTE ON RELIABILITY:
-- The S&P 500 list is a widely-used, actively maintained free dataset
-  (github.com/datasets/s-and-p-500-companies). If that repo ever moves,
-  SP500_LIST_URL below will need updating.
 - Twelve Data's free Basic plan is documented as 8 API credits/minute,
   800/day (each symbol in a request costs 1 credit) — but in practice
   the per-minute window can throttle even at exactly 8/8 credits with a
   65s gap (no headroom, and the window isn't perfectly aligned with our
   own timing). This script uses 6 symbols/batch with a 75s gap and
-  escalating backoff (75s/120s/180s) on repeated 429s, which costs more
-  runtime (~1.5-2 hours for ~500 stocks) but is far more reliable. The
-  long runtime is normal for this script, not a sign anything is stuck —
-  check the log for "Rate limited" / "Waiting Ns and retrying" lines to
-  see it progressing.
+  escalating backoff (75s/120s/180s) on repeated 429s. With only ~31
+  symbols in WATCHLIST that's just a handful of batches (a few minutes
+  total), not the 1.5-2 hours this took when it covered the full S&P 500.
 - This report only makes sense for a stock that had price data for the
-  entire 3-month window and still trades under the same ticker; stocks
-  that were added/removed/renamed partway through are simply skipped
-  (not enough data points), not counted as an error.
+  entire 3-month window and still trades under the same ticker; a stock
+  that was delisted or renamed partway through is simply skipped (not
+  enough data points), not counted as an error.
 """
 
-import csv
-import io
 import json
 import os
 import sys
@@ -67,10 +57,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
-SP500_LIST_URL = (
-    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/"
-    "master/data/constituents.csv"
-)
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 
 WINDOW_MONTHS = 3
@@ -87,36 +73,49 @@ BATCH_SIZE = 6
 BATCH_DELAY_SECONDS = 75  # comfortably over a minute, with headroom below the 8-credit cap
 TOP_N = 10
 
+# Fixed watchlist — edit this dict directly to add, remove, or rename
+# tickers. {symbol: display_name}. Twelve Data uses '-' for share
+# classes (e.g. BRK-B), not '.'.
+WATCHLIST = {
+    "LIN": "Linde",
+    "SHW": "Sherwin-Williams",
+    "FCX": "Freeport-McMoRan",
+    "GOOG": "Alphabet",
+    "TMUS": "T-Mobile US",
+    "XOM": "Exxon Mobil",
+    "CVX": "Chevron",
+    "BRK-B": "Berkshire Hathaway",
+    "JPM": "JPMorgan Chase",
+    "BAC": "Bank of America",
+    "UNP": "Union Pacific",
+    "UPS": "United Parcel Service",
+    "RTX": "RTX Corporation",
+    "HON": "Honeywell",
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "PG": "Procter & Gamble",
+    "KO": "Coca-Cola",
+    "PEP": "PepsiCo",
+    "COST": "Costco",
+    "PLD": "Prologis",
+    "AMT": "American Tower",
+    "CCI": "Crown Castle",
+    "NEE": "NextEra Energy",
+    "DUK": "Duke Energy",
+    "SO": "Southern Company",
+    "D": "Dominion Energy",
+    "UNH": "UnitedHealth Group",
+    "JNJ": "Johnson & Johnson",
+    "PFE": "Pfizer",
+    "AMZN": "Amazon",
+}
 
-# ---------------------------------------------------------------------
-# S&P 500 ticker list
-# ---------------------------------------------------------------------
 
 def fetch_sp500_list() -> dict:
-    """Returns {symbol: company_name} for the current S&P 500 index."""
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; MonthlyGainersBot/1.0)"}
-    resp = requests.get(SP500_LIST_URL, headers=headers, timeout=30)
-    resp.raise_for_status()
-
-    lines = resp.text.strip().splitlines()
-    header = lines[0].split(",")
-    symbol_idx = header.index("Symbol")
-    name_idx = header.index("Security")
-
-    companies = {}
-    for line in lines[1:]:
-        # Company names can contain commas inside quotes; a proper CSV
-        # reader handles that correctly, a manual split() would not.
-        row = next(csv.reader(io.StringIO(line)))
-        if len(row) <= max(symbol_idx, name_idx):
-            continue
-        symbol = row[symbol_idx].strip()
-        name = row[name_idx].strip()
-        if symbol:
-            # Twelve Data (like most US data providers) uses '-' where
-            # this dataset sometimes uses '.' for share classes (e.g. BRK.B).
-            companies[symbol.replace(".", "-")] = name
-    return companies
+    """Returns {symbol: display_name} — now just the fixed WATCHLIST
+    above (kept as a function for minimal disruption to the rest of
+    the script, which calls this to get its ticker universe)."""
+    return dict(WATCHLIST)
 
 
 # ---------------------------------------------------------------------
