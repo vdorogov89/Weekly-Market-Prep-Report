@@ -37,7 +37,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add seen_podcasts.json
+          if [ -f seen_podcasts.json ]; then
+            git add seen_podcasts.json
+          fi
           if ! git diff --cached --quiet; then
             git commit -m "Update seen_podcasts.json"
             git push

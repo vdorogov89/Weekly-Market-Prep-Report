@@ -42,7 +42,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add deepdive_sent_state.json
+          # The file may not exist yet — a test run (TEST_RANK set) never
+          # touches it, and a normal run that found nothing due today
+          # returns before creating it either. `git add` on a missing
+          # file would fail the whole step, so only add it if present.
+          if [ -f deepdive_sent_state.json ]; then
+            git add deepdive_sent_state.json
+          fi
           if ! git diff --cached --quiet; then
             git commit -m "Update deepdive_sent_state.json"
             git push
