@@ -1,0 +1,67 @@
+{
+  "report_date": "2026-10-03",
+  "window_start": "2026-07-02",
+  "window_end": "2026-10-02",
+  "companies": [
+    {
+      "rank": 1,
+      "symbol": "MRNA",
+      "name": "Moderna",
+      "pct_change": 136.8856569709127
+    },
+    {
+      "rank": 2,
+      "symbol": "P",
+      "name": "Everpure",
+      "pct_change": 84.47256223353048
+    },
+    {
+      "rank": 3,
+      "symbol": "MPC",
+      "name": "Marathon Petroleum",
+      "pct_change": 57.743560813082006
+    },
+    {
+      "rank": 4,
+      "symbol": "HPE",
+      "name": "Hewlett Packard Enterprise",
+      "pct_change": 56.633519282076165
+    },
+    {
+      "rank": 5,
+      "symbol": "ACN",
+      "name": "Accenture",
+      "pct_change": 54.56860905943874
+    },
+    {
+      "rank": 6,
+      "symbol": "SMCI",
+      "name": "Supermicro",
+      "pct_change": 54.00440852314476
+    },
+    {
+      "rank": 7,
+      "symbol": "VLO",
+      "name": "Valero Energy",
+      "pct_change": 52.54704763418554
+    },
+    {
+      "rank": 8,
+      "symbol": "PSX",
+      "name": "Phillips 66",
+      "pct_change": 49.77327400521483
+    },
+    {
+      "rank": 9,
+      "symbol": "PLTR",
+      "name": "Palantir Technologies",
+      "pct_change": 46.976019334880114
+    },
+    {
+      "rank": 10,
+      "symbol": "HPQ",
+      "name": "HP Inc.",
+      "pct_change": 46.60282717738258
+    }
+  ]
+}
