@@ -167,26 +167,41 @@ def main() -> None:
         print(f"No {TOP10_FILE} found yet — monthly_top_gainers.py hasn't run successfully. Nothing to do.")
         return
 
-    report_date = date.fromisoformat(top10["report_date"])
     today = datetime.now(timezone.utc).date()
-    offset = (today - report_date).days
 
-    print(f"Diagnostic: report_date={report_date}, today={today}, offset={offset} days.")
+    # Manual test mode: set via the workflow_dispatch "test_rank" input.
+    # Bypasses the date/offset logic entirely and does NOT touch
+    # deepdive_sent_state.json, so it has no effect on the normal daily
+    # cycle — safe to run any time, as many times as useful.
+    test_rank_raw = os.environ.get("TEST_RANK", "").strip()
+    is_test_mode = bool(test_rank_raw)
 
-    if not (1 <= offset <= NUM_COMPANIES):
-        print(f"Offset {offset} is outside the 1-{NUM_COMPANIES} day window — nothing due today.")
-        return
+    if is_test_mode:
+        try:
+            rank = int(test_rank_raw)
+        except ValueError:
+            print(f"Warning: TEST_RANK={test_rank_raw!r} is not a valid integer.", file=sys.stderr)
+            return
+        print(f"Diagnostic: TEST MODE — forcing rank {rank}, ignoring date/offset and not touching state file.")
+    else:
+        report_date = date.fromisoformat(top10["report_date"])
+        offset = (today - report_date).days
+        print(f"Diagnostic: report_date={report_date}, today={today}, offset={offset} days.")
 
-    state = load_state()
-    if state.get("report_date") != top10["report_date"]:
-        # A new month's top-10 list has appeared since we last tracked
-        # state — start tracking fresh for this cycle.
-        state = {"report_date": top10["report_date"], "sent_ranks": []}
+        if not (1 <= offset <= NUM_COMPANIES):
+            print(f"Offset {offset} is outside the 1-{NUM_COMPANIES} day window — nothing due today.")
+            return
 
-    rank = offset
-    if rank in state["sent_ranks"]:
-        print(f"Rank {rank} was already sent for this cycle — nothing to do.")
-        return
+        state = load_state()
+        if state.get("report_date") != top10["report_date"]:
+            # A new month's top-10 list has appeared since we last tracked
+            # state — start tracking fresh for this cycle.
+            state = {"report_date": top10["report_date"], "sent_ranks": []}
+
+        rank = offset
+        if rank in state["sent_ranks"]:
+            print(f"Rank {rank} was already sent for this cycle — nothing to do.")
+            return
 
     company = next((c for c in top10["companies"] if c["rank"] == rank), None)
     if company is None:
@@ -200,8 +215,9 @@ def main() -> None:
         print(f"Warning: failed to generate deep-dive for rank {rank} ({company['symbol']}): {exc}", file=sys.stderr)
         return  # not marked as sent, so it will be retried on the next run
 
+    test_prefix = "\U0001F9EA ТЕСТОВЫЙ ЗАПУСК\n\n" if is_test_mode else ""
     message = (
-        f"\U0001F4C4 Разбор компании #{rank} из топ-10 (рост {company['pct_change']:+.1f}%)\n\n"
+        f"{test_prefix}\U0001F4C4 Разбор компании #{rank} из топ-10 (рост {company['pct_change']:+.1f}%)\n\n"
         f"*{company['name']} ({company['symbol']})*\n\n"
         f"{deepdive_text}"
     )
@@ -210,11 +226,14 @@ def main() -> None:
         send_telegram_message(message)
     except Exception as exc:  # noqa: BLE001
         print(f"Warning: failed to send Telegram message for rank {rank}: {exc}", file=sys.stderr)
-        return  # not marked as sent, so it will be retried on the next run
+        return  # not marked as sent (in non-test mode), so it will be retried on the next run
 
-    state["sent_ranks"].append(rank)
-    save_state(state)
-    print(f"Sent deep-dive for rank {rank} ({company['symbol']}).")
+    if is_test_mode:
+        print(f"Sent TEST deep-dive for rank {rank} ({company['symbol']}). State file not touched.")
+    else:
+        state["sent_ranks"].append(rank)
+        save_state(state)
+        print(f"Sent deep-dive for rank {rank} ({company['symbol']}).")
 
 
 if __name__ == "__main__":
