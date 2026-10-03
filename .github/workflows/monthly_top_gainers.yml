@@ -10,7 +10,7 @@ on:
 jobs:
   send-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 150   # the full S&P 500 pull now takes ~1.5-2 hours by design; this is a safety cap
+    timeout-minutes: 20   # ~31-ticker watchlist takes a few minutes; this is a safety cap with margin for retries
     permissions:
       contents: write   # needed to commit top10_companies.json back for company_deepdive.py
     steps:
