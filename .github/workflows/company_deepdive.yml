@@ -6,7 +6,12 @@ on:
     # nothing (only the 10 days following the monthly top-10 report are
     # "due" — see company_deepdive.py), which is expected, not an error.
     - cron: '0 9 * * *'
-  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab to test
+  workflow_dispatch:
+    inputs:
+      test_rank:
+        description: 'Testing: rank to generate right now (1-10). Leave empty for the normal daily run.'
+        required: false
+        type: string
 
 jobs:
   send-deepdive:
@@ -30,6 +35,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TEST_RANK: ${{ github.event.inputs.test_rank }}
         run: python company_deepdive.py
 
       - name: Save "already sent" state back to the repo
