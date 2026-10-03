@@ -54,6 +54,7 @@ NOTE ON RELIABILITY:
 
 import csv
 import io
+import json
 import os
 import sys
 import time
@@ -234,33 +235,68 @@ def fetch_window_returns(symbols: list, start_date: date, end_date: date) -> dic
 # Message assembly + sending
 # ---------------------------------------------------------------------
 
-def build_message(companies: dict, start_date: date, end_date: date) -> str:
+TOP10_STATE_FILE = "top10_companies.json"
+
+
+def compute_top10(companies: dict, start_date: date, end_date: date) -> tuple:
+    """
+    Returns (top_list, analyzed_count, total_count) where top_list is a
+    list of {"rank", "symbol", "name", "pct_change"} dicts, longest
+    first. analyzed_count/total_count are for the "N of M analyzed"
+    footer line.
+    """
     symbols = list(companies.keys())
     returns = fetch_window_returns(symbols, start_date, end_date)
 
+    ranked = sorted(returns.items(), key=lambda kv: kv[1], reverse=True)[:TOP_N]
+    top_list = [
+        {"rank": i, "symbol": symbol, "name": companies.get(symbol, symbol), "pct_change": pct}
+        for i, (symbol, pct) in enumerate(ranked, start=1)
+    ]
+    return top_list, len(returns), len(symbols)
+
+
+def save_top10_state(top_list: list, report_date: date, window_start: date, window_end: date) -> None:
+    """
+    Saves the top-10 list to a JSON file so a separate daily script
+    (company_deepdive.py) can send one deep-dive report per company on
+    the days following this report, in rank order.
+    """
+    data = {
+        "report_date": report_date.isoformat(),
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "companies": top_list,
+    }
+    with open(TOP10_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def build_message(top_list: list, analyzed_count: int, total_count: int, start_date: date, end_date: date) -> str:
     header = (
         f"\U0001F3C6 Топ-10 акций S&P 500 по росту цены за последние {WINDOW_MONTHS} месяца\n"
         f"({start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')})\n"
     )
 
-    if not returns:
+    if not top_list:
         return header + "\nНе удалось получить данные — см. лог workflow."
 
-    top = sorted(returns.items(), key=lambda kv: kv[1], reverse=True)[:TOP_N]
-
     lines = [header]
-    for rank, (symbol, pct) in enumerate(top, start=1):
-        name = companies.get(symbol, symbol)
-        sign = "+" if pct >= 0 else ""
-        lines.append(f"{rank}. {symbol} ({name}): {sign}{pct:.1f}%")
+    for item in top_list:
+        sign = "+" if item["pct_change"] >= 0 else ""
+        lines.append(f"{item['rank']}. {item['symbol']} ({item['name']}): {sign}{item['pct_change']:.1f}%")
 
     lines.append(
-        f"\nПроанализировано инструментов: {len(returns)} из {len(symbols)} "
+        f"\nПроанализировано инструментов: {analyzed_count} из {total_count} "
         f"(остальные пропущены из-за нехватки данных, например недавние IPO)."
     )
     lines.append(
         "\u26A0\uFE0F Рост цены за прошедший период — исторический факт, "
         "не прогноз и не рекомендация."
+    )
+    lines.append(
+        "\n\U0001F4C4 С завтрашнего дня — подробный разбор каждой компании "
+        "из этого списка, по одной в день."
     )
     return "\n".join(lines)
 
@@ -282,7 +318,12 @@ def main() -> None:
     start_date, end_date = rolling_window_bounds(today)
 
     companies = fetch_sp500_list()
-    message = build_message(companies, start_date, end_date)
+    top_list, analyzed_count, total_count = compute_top10(companies, start_date, end_date)
+
+    if top_list:
+        save_top10_state(top_list, today, start_date, end_date)
+
+    message = build_message(top_list, analyzed_count, total_count, start_date, end_date)
     send_telegram_message(message)
     print("Monthly top gainers report sent.")
 
