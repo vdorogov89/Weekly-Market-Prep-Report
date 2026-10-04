@@ -18,9 +18,9 @@ What this does:
 
 Expected Google Sheet columns (header row, in this order or any order —
 matched by name, not position):
-    Open_Date | Close_Date | Instrument | Direction | Open_Price | Close_Price | Result_R | Rule_Based | CFTC_Aligned | State | Setup | Notes | Open_Time | Close_Time | Stop_Price | Target_Price | Exit_Reason
+    Open_Date | Close_Date | Instrument | Direction | Open_Price | Close_Price | Result_R | Rule_Based | CFTC_Aligned | State | Setup | Notes | Open_Time | Close_Time | Stop_Price | Target_Price | Exit_Reason | CFTC_Level
 
-    (The last five are optional and can simply be appended after Notes.)
+    (The last six are optional and can simply be appended after Notes.)
 
     Open_Date     - date you entered the trade, YYYY-MM-DD (or common formats)
     Close_Date    - date you closed the trade, same format. Required —
@@ -37,8 +37,20 @@ matched by name, not position):
     Result_R      - numeric: your result in R-multiples (or % — just be
                     consistent). Positive = win, negative = loss, 0 = BE.
     Rule_Based    - Да / Нет (was this a planned, system trade)
-    CFTC_Aligned  - Да / Нет / Не проверял (did direction match CFTC
-                    consensus from the weekly report at entry time)
+    CFTC_Aligned  - by FLOW: Да / Нет / Не проверял. Compare your direction
+                    with the side where large speculators ADDED more
+                    contracts over the latest week (the "Изменение
+                    контрактов за неделю" line of the weekly CFTC report:
+                    whichever of Long/Short grew more). Use the latest
+                    report published BEFORE your entry.
+    CFTC_Level    - by LEVEL: Да / Нет / Не проверял. Compare your direction
+                    with the side holding the majority of positions (the
+                    "Long X% / Short Y%" line of the same report). The two
+                    can disagree — e.g. 90% long (level) while that week's
+                    new contracts were mostly short (flow) — and the
+                    report breaks results down by each, plus the combos,
+                    so you can see which one actually carries information.
+                    Fill both the same way every time.
     State         - your state at entry, one word: Усталость / Спокойствие /
                     Азарт (optional; blank is fine — such trades are simply
                     left out of the by-state breakdown)
@@ -162,6 +174,7 @@ def fetch_journal_rows() -> tuple:
             "result_r": result_r,
             "rule_based": row.get("Rule_Based", "").strip().lower(),
             "cftc_aligned": row.get("CFTC_Aligned", "").strip().lower(),
+            "cftc_level": row.get("CFTC_Level", "").strip().lower(),
             "state": normalize_state(row.get("State", "")),
             "setup": row.get("Setup", "").strip() or "(без тега)",
             "holding_days": holding_days,
@@ -414,13 +427,37 @@ def build_message(trades: list, period_start: date, period_end: date, issues: li
             lines.append(fmt_bucket(label, by_rule[label]))
     lines.append("")
 
-    cftc_trades = [t for t in trades if t["cftc_aligned"] in ("да", "нет")]
-    if cftc_trades:
-        lines.append("\U0001F3AF Совпадение с консенсусом CFTC:")
-        by_cftc = compute_breakdown(cftc_trades, lambda t: "Совпадало" if t["cftc_aligned"] == "да" else "Не совпадало")
-        for label in ("Совпадало", "Не совпадало"):
-            if label in by_cftc:
-                lines.append(fmt_bucket(label, by_cftc[label]))
+    flow_trades = [t for t in trades if t["cftc_aligned"] in ("да", "нет")]
+    if flow_trades:
+        lines.append("\U0001F3AF CFTC по потоку (куда за неделю добавляли контракты):")
+        by_flow = compute_breakdown(flow_trades, lambda t: "С потоком" if t["cftc_aligned"] == "да" else "Против потока")
+        for label in ("С потоком", "Против потока"):
+            if label in by_flow:
+                lines.append(fmt_bucket(label, by_flow[label]))
+        lines.append("")
+
+    level_trades = [t for t in trades if t["cftc_level"] in ("да", "нет")]
+    if level_trades:
+        lines.append("\U0001F4CA CFTC по уровню (на чьей стороне большинство позиций):")
+        by_level = compute_breakdown(level_trades, lambda t: "С большинством" if t["cftc_level"] == "да" else "Против большинства")
+        for label in ("С большинством", "Против большинства"):
+            if label in by_level:
+                lines.append(fmt_bucket(label, by_level[label]))
+        lines.append("")
+
+    both_trades = [t for t in trades if t["cftc_aligned"] in ("да", "нет") and t["cftc_level"] in ("да", "нет")]
+    if both_trades:
+        lines.append("\U0001F9E9 CFTC: поток + уровень вместе:")
+        def combo(t):
+            flow = "С потоком" if t["cftc_aligned"] == "да" else "Против потока"
+            level = "с большинством" if t["cftc_level"] == "да" else "против большинства"
+            return f"{flow}, {level}"
+        by_combo = compute_breakdown(both_trades, combo)
+        order = ["С потоком, с большинством", "С потоком, против большинства",
+                 "Против потока, с большинством", "Против потока, против большинства"]
+        for label in order:
+            if label in by_combo:
+                lines.append(fmt_bucket(label, by_combo[label]))
         lines.append("")
 
     # Negative durations come from a date typo (already flagged at the top);
