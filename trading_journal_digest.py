@@ -18,7 +18,7 @@ What this does:
 
 Expected Google Sheet columns (header row, in this order or any order —
 matched by name, not position):
-    Open_Date | Close_Date | Instrument | Direction | Open_Price | Close_Price | Result_R | Rule_Based | CFTC_Aligned | Setup | Notes
+    Open_Date | Close_Date | Instrument | Direction | Open_Price | Close_Price | Result_R | Rule_Based | CFTC_Aligned | State | Setup | Notes
 
     Open_Date     - date you entered the trade, YYYY-MM-DD (or common formats)
     Close_Date    - date you closed the trade, same format. Required —
@@ -37,6 +37,9 @@ matched by name, not position):
     Rule_Based    - Да / Нет (was this a planned, system trade)
     CFTC_Aligned  - Да / Нет / Не проверял (did direction match CFTC
                     consensus from the weekly report at entry time)
+    State         - your state at entry, one word: Усталость / Спокойствие /
+                    Азарт (optional; blank is fine — such trades are simply
+                    left out of the by-state breakdown)
     Setup         - free-text tag (breakout, reversal, news, etc.)
     Notes         - free text, not used in stats
 
@@ -121,10 +124,30 @@ def fetch_journal_rows() -> list:
             "result_r": result_r,
             "rule_based": row.get("Rule_Based", "").strip().lower(),
             "cftc_aligned": row.get("CFTC_Aligned", "").strip().lower(),
+            "state": normalize_state(row.get("State", "")),
             "setup": row.get("Setup", "").strip() or "(без тега)",
             "holding_days": holding_days,
         })
     return rows
+
+
+def normalize_state(text: str) -> str:
+    """
+    Maps free-typed state text to one of three canonical labels, tolerating
+    case and common endings (Усталость / устал / усталый -> Усталость).
+    Returns "" if empty. Unrecognized non-empty text is kept as typed
+    (capitalized), so a custom state you invent still gets its own bucket.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return ""
+    if t.startswith("устал"):
+        return "Усталость"
+    if t.startswith("спок"):
+        return "Спокойствие"
+    if t.startswith("азарт"):
+        return "Азарт"
+    return t.capitalize()
 
 
 def _parse_date(text: str):
@@ -254,6 +277,16 @@ def build_message(trades: list, period_start: date, period_end: date) -> str:
         for label in ("Внутри дня", "Свинг (1-5 дн.)", "Позиционная (6+ дн.)"):
             if label in by_duration:
                 lines.append(fmt_bucket(label, by_duration[label]))
+        lines.append("")
+
+    state_trades = [t for t in trades if t["state"]]
+    if state_trades:
+        lines.append("\U0001F9E0 По состоянию при входе:")
+        by_state = compute_breakdown(state_trades, lambda t: t["state"])
+        ordered = [k for k in ("Спокойствие", "Усталость", "Азарт") if k in by_state]
+        ordered += sorted(k for k in by_state if k not in ordered)
+        for label in ordered:
+            lines.append(fmt_bucket(label, by_state[label]))
         lines.append("")
 
     lines.append("\U0001F3F7 По тегам сетапа:")
