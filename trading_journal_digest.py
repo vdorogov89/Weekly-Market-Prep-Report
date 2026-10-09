@@ -133,8 +133,12 @@ def fetch_journal_rows() -> tuple:
         if not row.get("Close_Date"):
             # Completely empty rows are normal in a sheet; a row with data
             # but no Close_Date is worth mentioning.
-            if any(row.get(k) for k in ("Instrument", "Open_Date", "Result_R")):
-                skipped.append(f"{label}: строка пропущена — не заполнен Close_Date")
+            # A row with no Close_Date AND no Result_R is simply a trade that
+            # is still open (rows are created at entry, see State logging) —
+            # normal, not an error. Only a filled Result_R without a
+            # Close_Date is a real mistake worth flagging.
+            if row.get("Result_R"):
+                skipped.append(f"{label}: строка пропущена — есть Result_R, но не заполнен Close_Date")
             continue
         close_date = _parse_date(row["Close_Date"])
         if close_date is None:
