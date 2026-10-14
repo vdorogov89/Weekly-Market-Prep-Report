@@ -14,18 +14,20 @@ What this does:
 3. If so, and we haven't already reminded about it (tracked in a state
    file committed back to the repo), sends a Telegram message.
 
-WHY A 30-60 MINUTE WINDOW, CHECKED EVERY 30 MINUTES:
-GitHub Actions documents its `schedule` trigger as best-effort, not
-guaranteed — runs can be delayed by anywhere from a few minutes to
-much longer during high load. Checking every 30 minutes (rather than
-every 5-10) also matters for a separate reason: GitHub bills each job
-run in whole-minute increments regardless of how briefly it actually
-runs, so a 5-10 minute check interval adds up to 2000+ billed minutes a
-month all by itself — enough to exhaust a private repo's entire free
-Actions quota (public repos have unlimited free minutes, so this only
-matters if this repo is private). A 30-minute window guarantees at
-least 30 minutes' notice and is wide enough that no event's countdown
-can slip through entirely between two 30-minute-spaced checks.
+HOW RELIABLE THIS IS (AND ISN'T):
+GitHub documents the `schedule` trigger as best-effort: runs can be
+delayed during high load ("high load times include the start of every
+hour"), and "if the load is sufficiently high enough, some queued jobs
+may be dropped". On 2026-10-14 this repo got 4 runs in ~14 hours instead
+of ~28, and none fell inside the window before the 15:30 MSK CPI release,
+so no reminder was sent. No window width can fix a run that never
+happens, so this script now (a) is triggered every 10 minutes at minutes
+away from :00/:30 to give GitHub more chances, (b) sends TWO reminders
+for High events (about an hour before, and a last call ~15 minutes
+before) so one dropped run doesn't lose the event, and (c) groups events
+that start at the same time (e.g. the four CPI lines) into one message.
+It is still best-effort: for anything you can't afford to miss, keep the
+event in the weekly report's calendar too.
 
 Requirements (installed automatically by the GitHub Actions workflow):
     pip install requests python-dateutil
@@ -53,12 +55,15 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 STATE_FILE = "reminded_events.json"
 
-# Remind when an event starts between REMIND_MIN and REMIND_MAX minutes
-# from now. The window must be at least as wide as the check interval
-# (30 minutes, see the workflow's cron) so that no event's countdown can
-# slip through entirely between two checks.
-REMIND_MIN_MINUTES = 30
-REMIND_MAX_MINUTES = 60
+# Each stage reminds when an event starts between "min" and "max" minutes
+# from now, once per event. Each window is at least twice as wide as the
+# check interval (10 minutes, see the workflow's cron), so a normal run
+# schedule gets two chances per stage. "only_high" keeps the second
+# reminder for High-impact events only, to limit noise.
+REMINDER_STAGES = [
+    {"name": "early", "min": 40, "max": 65, "only_high": False, "prefix": "\u23F0"},
+    {"name": "late", "min": 5, "max": 25, "only_high": True, "prefix": "\u23F0\u23F0"},
+]
 
 # Entries older than this are dropped from the state file so it doesn't
 # grow forever.
@@ -162,32 +167,48 @@ def main() -> None:
     events = fetch_usd_events()
     state = load_state()
 
-    due = []
+    # (stage name, start time) -> [(event, state key, minutes until start)]
+    groups = {}
     for e in events:
         minutes_until = (e["when"] - now_utc).total_seconds() / 60
-        if REMIND_MIN_MINUTES <= minutes_until <= REMIND_MAX_MINUTES and e["id"] not in state:
-            due.append((e, minutes_until))
+        for stage in REMINDER_STAGES:
+            if stage["only_high"] and e["impact"] != "High":
+                continue
+            if not (stage["min"] <= minutes_until <= stage["max"]):
+                continue
+            key = f"{e['id']}|{stage['name']}"
+            if key in state:
+                continue
+            # Entries written by the previous single-window version had no
+            # stage suffix; treat them as the "early" reminder already sent.
+            if stage["name"] == "early" and e["id"] in state:
+                continue
+            groups.setdefault((stage["name"], e["when"]), []).append((e, key, minutes_until))
 
-    print(f"Diagnostic: {len(events)} USD events this week, {len(due)} due for a reminder right now.")
+    due_count = sum(len(v) for v in groups.values())
+    print(f"Diagnostic: {len(events)} USD events this week, {due_count} due for a reminder right now.")
 
-    for event, minutes_until in due:
-        moscow_time = event["when"].astimezone(timezone(timedelta(hours=3)))
-        impact_icon = "\U0001F534" if event["impact"] == "High" else "\U0001F7E1"
-        message = (
-            f"\u23F0 Через ~{round(minutes_until)} мин ({moscow_time.strftime('%H:%M')} МСК):\n"
-            f"{impact_icon} {event['title']} (USD, {event['impact']})"
-        )
+    sent = 0
+    stage_by_name = {st["name"]: st for st in REMINDER_STAGES}
+    for (stage_name, when), items in sorted(groups.items(), key=lambda kv: kv[0][1]):
+        moscow_time = when.astimezone(timezone(timedelta(hours=3)))
+        minutes_until = items[0][2]
+        lines = [f"{stage_by_name[stage_name]['prefix']} Через ~{round(minutes_until)} мин ({moscow_time.strftime('%H:%M')} МСК):"]
+        for event, _key, _m in items:
+            icon = "\U0001F534" if event["impact"] == "High" else "\U0001F7E1"
+            lines.append(f"{icon} {event['title']} (USD, {event['impact']})")
         try:
-            send_telegram_message(message)
-            state[event["id"]] = now_utc.isoformat()
+            send_telegram_message("\n".join(lines))
+            for _event, key, _m in items:
+                state[key] = now_utc.isoformat()
+            sent += 1
         except Exception as exc:  # noqa: BLE001
-            print(f"Warning: failed to send reminder for {event['title']!r}: {exc}", file=sys.stderr)
-            # Not marked as reminded, so it will be retried on the next run
-            # (still within the window, since the window is 10 minutes wide).
+            print(f"Warning: failed to send reminder for {when.isoformat()}: {exc}", file=sys.stderr)
+            # Not marked as reminded, so the next run retries while still in the window.
 
     state = prune_state(state, now_utc)
     save_state(state)
-    print(f"Sent {len(due)} reminder(s).")
+    print(f"Sent {sent} reminder message(s).")
 
 
 if __name__ == "__main__":
