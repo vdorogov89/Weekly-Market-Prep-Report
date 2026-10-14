@@ -2,11 +2,13 @@ name: Calendar Event Reminders
 
 on:
   schedule:
-    # Every 30 minutes. Paired with the 30-60 minute reminder window in
-    # the script, this both absorbs GitHub's documented scheduling
-    # jitter and keeps this workflow's Actions-minutes usage far lower
-    # than a 5-10 minute interval would (see README for the math).
-    - cron: '*/30 * * * *'
+    # Every 10 minutes, at minutes ending in 4 (never :00 or :30). GitHub
+    # documents the start of every hour as a high-load time when scheduled
+    # runs get delayed or dropped, and on 2026-10-14 a */30 schedule got
+    # only 4 runs in ~14 hours. More attempts, away from the busy marks,
+    # raise the odds that one lands inside each reminder window. The
+    # repo is public, so the extra runs cost nothing.
+    - cron: '4,14,24,34,44,54 * * * *'
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab to test
 
 jobs:
