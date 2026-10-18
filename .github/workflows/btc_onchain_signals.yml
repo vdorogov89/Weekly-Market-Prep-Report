@@ -1,0 +1,50 @@
+name: BTC On-chain Signals
+
+on:
+  schedule:
+    # Fallback only (GitHub's scheduler is best-effort). The primary trigger
+    # is cron-job.org calling workflow_dispatch every 4 hours, see README.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_status:
+        description: 'Send the status message now (test)'
+        type: boolean
+        default: false
+
+jobs:
+  btc-signals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # commit the state file back
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run BTC signals
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FORCE_STATUS: ${{ inputs.force_status && '1' || '' }}
+        run: python btc_onchain_signals.py
+
+      - name: Commit state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f btc_signals_state.json ]; then
+            git add btc_signals_state.json
+            git diff --cached --quiet || git commit -m "Update BTC signals state"
+            git pull --rebase origin main || true
+            git push || true
+          fi
