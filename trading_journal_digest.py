@@ -161,6 +161,7 @@ def fetch_journal_rows() -> tuple:
         close_time = _parse_time(row.get("Close_Time", ""))
 
         holding_days = (close_date - open_date).days if open_date else None
+        holding_hours, hours_exact = compute_holding_hours(open_date, open_time, close_date, close_time)
 
         trade = {
             "open_date": open_date,
@@ -182,6 +183,8 @@ def fetch_journal_rows() -> tuple:
             "state": normalize_state(row.get("State", "")),
             "setup": row.get("Setup", "").strip() or "(без тега)",
             "holding_days": holding_days,
+            "holding_hours": holding_hours,
+            "hours_exact": hours_exact,
         }
         trade["planned_rr"] = planned_rr(trade)
         trade["issues"] = validate_trade(trade)
@@ -361,12 +364,86 @@ def compute_breakdown(trades: list, key_func) -> dict:
 RUSSIAN_WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 
 
-def holding_bucket(days: int) -> str:
-    if days <= 0:
-        return "Внутри дня"
-    if days <= 5:
-        return "Свинг (1-5 дн.)"
-    return "Позиционная (6+ дн.)"
+SHORT_MAX_HOURS = 24      # short:  up to 24 hours
+MEDIUM_MAX_HOURS = 120    # medium: 1-5 days; long: more than 5 days
+HOLD_LABELS = ("Короткие (до 24 ч)", "Средние (1-5 дн.)", "Длинные (более 5 дн.)")
+MIN_PER_SIDE_FOR_RULE = 3  # wins AND losses needed for the winners-vs-losers rule
+
+
+def compute_holding_hours(open_date, open_time, close_date, close_time):
+    """Returns (hours, exact). Exact only when both dates AND both times are
+    filled; otherwise the whole-day difference x 24 is used (exact=False)."""
+    if open_date is None or close_date is None:
+        return None, False
+    if open_time is not None and close_time is not None:
+        start = datetime.combine(open_date, open_time)
+        end = datetime.combine(close_date, close_time)
+        return (end - start).total_seconds() / 3600, True
+    return (close_date - open_date).days * 24.0, False
+
+
+def holding_bucket(hours: float) -> str:
+    if hours <= SHORT_MAX_HOURS:
+        return HOLD_LABELS[0]
+    if hours <= MEDIUM_MAX_HOURS:
+        return HOLD_LABELS[1]
+    return HOLD_LABELS[2]
+
+
+def fmt_hours(hours: float) -> str:
+    if hours < 48:
+        return f"{hours:.0f} ч" if hours >= 1 else f"{hours * 60:.0f} мин"
+    return f"{hours / 24:.1f} дн."
+
+
+def _median(values: list) -> float:
+    v = sorted(values)
+    n = len(v)
+    mid = n // 2
+    return v[mid] if n % 2 else (v[mid - 1] + v[mid]) / 2
+
+
+def duration_section(trades: list) -> list:
+    """Lines for the duration block: groups, winners-vs-losers and a rule
+    that is only stated when there is enough data behind it."""
+    usable = [t for t in trades if t.get("holding_hours") is not None and t["holding_hours"] >= 0]
+    if not usable:
+        return []
+    lines = ["\u23F1 По длительности сделки:"]
+    by_duration = compute_breakdown(usable, lambda t: holding_bucket(t["holding_hours"]))
+    for label in HOLD_LABELS:
+        if label in by_duration:
+            lines.append(fmt_bucket(label, by_duration[label]))
+    if any(not t["hours_exact"] for t in usable):
+        lines.append("  (где не заполнено Open_Time/Close_Time, длительность округлена до суток)")
+
+    wins = [t["holding_hours"] for t in usable if t["result_r"] > 0]
+    losses = [t["holding_hours"] for t in usable if t["result_r"] < 0]
+    lines.append("")
+    if len(wins) >= MIN_PER_SIDE_FOR_RULE and len(losses) >= MIN_PER_SIDE_FOR_RULE:
+        mw, ml = _median(wins), _median(losses)
+        lines.append(f"  Медиана удержания: прибыльные {fmt_hours(mw)}, убыточные {fmt_hours(ml)}")
+        if ml > 1.5 * mw:
+            limit = mw * 1.5
+            lines.append(
+                f"  Правило: убыточные сделки держатся заметно дольше прибыльных. "
+                f"Если сделка живёт дольше {fmt_hours(limit)} и не в плюсе, "
+                f"решение закрыть или оставить принимайте по плану, а не по надежде."
+            )
+        elif mw > 1.5 * ml:
+            lines.append(
+                "  Убытки вы режете быстро, а прибыль держите дольше: это здоровая картина. "
+                "Проверьте только, не закрываете ли прибыльные раньше цели."
+            )
+        else:
+            lines.append("  Длительность прибыльных и убыточных близка: правила по времени выхода из этих данных не видно.")
+    else:
+        lines.append(
+            f"  Правило по времени выхода пока не формируется: нужно хотя бы {MIN_PER_SIDE_FOR_RULE} прибыльных "
+            f"и {MIN_PER_SIDE_FOR_RULE} убыточных закрытых сделок (сейчас {len(wins)} и {len(losses)})."
+        )
+    lines.append("")
+    return lines
 
 
 # ---------------------------------------------------------------------
@@ -464,16 +541,9 @@ def build_message(trades: list, period_start: date, period_end: date, issues: li
                 lines.append(fmt_bucket(label, by_combo[label]))
         lines.append("")
 
-    # Negative durations come from a date typo (already flagged at the top);
-    # leave those rows out here rather than miscounting them as intraday.
-    duration_trades = [t for t in trades if t["holding_days"] is not None and t["holding_days"] >= 0]
-    if duration_trades:
-        lines.append("\u23F1 По длительности сделки:")
-        by_duration = compute_breakdown(duration_trades, lambda t: holding_bucket(t["holding_days"]))
-        for label in ("Внутри дня", "Свинг (1-5 дн.)", "Позиционная (6+ дн.)"):
-            if label in by_duration:
-                lines.append(fmt_bucket(label, by_duration[label]))
-        lines.append("")
+    # Negative durations come from a date/time typo (already flagged at the top);
+    # duration_section leaves those rows out instead of miscounting them.
+    lines.extend(duration_section(trades))
 
     exit_trades = [t for t in trades if t["exit_reason"]]
     if exit_trades:
