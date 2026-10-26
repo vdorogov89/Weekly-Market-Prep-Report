@@ -19,6 +19,7 @@ What this does:
 Expected Google Sheet columns (header row, in this order or any order —
 matched by name, not position):
     Open_Date | Close_Date | Instrument | Direction | Open_Price | Close_Price | Result_R | Rule_Based | CFTC_Aligned | State | Setup | Notes | Open_Time | Close_Time | Stop_Price | Target_Price | Exit_Reason | CFTC_Level
+    Optional extra columns: Result_USD (profit without swap) | Swap | Hold_Hours | MAE_R | MFE_R (MAE/MFE in R, filled by mae_mfe.py)
 
     (The last six are optional and can simply be appended after Notes.)
 
@@ -180,6 +181,10 @@ def fetch_journal_rows() -> tuple:
             "rule_based": row.get("Rule_Based", "").strip().lower(),
             "cftc_aligned": row.get("CFTC_Aligned", "").strip().lower(),
             "cftc_level": row.get("CFTC_Level", "").strip().lower(),
+            "result_usd": _parse_float(row.get("Result_USD", "")),
+            "swap": _parse_float(row.get("Swap", "")),
+            "mae_r": _parse_float(row.get("MAE_R", "")),
+            "mfe_r": _parse_float(row.get("MFE_R", "")),
             "state": normalize_state(row.get("State", "")),
             "setup": row.get("Setup", "").strip() or "(без тега)",
             "holding_days": holding_days,
@@ -450,6 +455,74 @@ def duration_section(trades: list) -> list:
 # Message formatting
 # ---------------------------------------------------------------------
 
+MIN_FOR_MAE_MFE = 3
+
+
+def money_section(trades: list) -> list:
+    """Dollar result block from the optional Result_USD column (profit WITHOUT
+    swap) and the optional Swap column. Silent when Result_USD is empty."""
+    usable = [t for t in trades if t.get("result_usd") is not None]
+    if not usable:
+        return []
+
+    def money(v):
+        return f"{v:+,.2f} $".replace(",", " ")
+
+    total = sum(t["result_usd"] for t in usable)
+    swap = sum(t["swap"] for t in usable if t.get("swap") is not None)
+    wins = [t["result_usd"] for t in usable if t["result_usd"] > 0]
+    losses = [t["result_usd"] for t in usable if t["result_usd"] < 0]
+    lines = ["\U0001F4B5 Результат в долларах (без свопа):",
+             f"  Итого: {money(total)} по {len(usable)} сделкам",
+             f"  Своп по этим сделкам: {money(swap)}, с учётом свопа: {money(total + swap)}"]
+    if wins:
+        lines.append(f"  Средний выигрыш: {money(sum(wins) / len(wins))} ({len(wins)} шт.)")
+    if losses:
+        lines.append(f"  Средний проигрыш: {money(sum(losses) / len(losses))} ({len(losses)} шт.)")
+    if wins and losses:
+        lines.append(f"  Профит-фактор: {sum(wins) / -sum(losses):.2f} (выигрыши / проигрыши)")
+        best = max(usable, key=lambda t: t["result_usd"])
+        worst = min(usable, key=lambda t: t["result_usd"])
+        lines.append(f"  Лучшая: {best['instrument']} {money(best['result_usd'])}, "
+                     f"худшая: {worst['instrument']} {money(worst['result_usd'])}")
+    lines.append("")
+    return lines
+
+
+def mae_mfe_section(trades: list) -> list:
+    """MAE/MFE block from the optional MAE_R / MFE_R columns (filled by
+    mae_mfe.py from exact MT5 bars). Silent when the columns are empty."""
+    usable = [t for t in trades if t.get("mae_r") is not None and t.get("mfe_r") is not None]
+    if not usable:
+        return []
+    lines = ["\U0001F4D0 MAE/MFE (ход цены внутри сделки, в R):"]
+    if len(usable) < MIN_FOR_MAE_MFE:
+        lines.append(f"  Данных пока мало ({len(usable)} сделок с MAE_R/MFE_R, нужно хотя бы {MIN_FOR_MAE_MFE}).")
+        lines.append("")
+        return lines
+
+    winners = [t for t in usable if t["result_r"] > 0]
+    losers = [t for t in usable if t["result_r"] < 0]
+    if losers:
+        avg_mfe = sum(t["mfe_r"] for t in losers) / len(losers)
+        big = sum(1 for t in losers if t["mfe_r"] >= 1.0)
+        lines.append(f"  Убыточные ({len(losers)}): до разворота в среднем успевали показать {avg_mfe:+.2f}R, "
+                     f"{big} из них доходили до +1R и выше.")
+        if len(losers) >= MIN_FOR_MAE_MFE and avg_mfe >= 0.5:
+            lines.append("  → Убытки часто были в плюсе: подумайте о частичной фиксации или переносе стопа в безубыток.")
+    if winners:
+        avg_mae = sum(t["mae_r"] for t in winners) / len(winners)
+        close_calls = sum(1 for t in winners if t["mae_r"] >= 0.8)
+        caps = [t["result_r"] / t["mfe_r"] for t in winners if t["mfe_r"] > 0]
+        cap_text = f", в среднем забрано {100 * sum(caps) / len(caps):.0f}% лучшего хода" if caps else ""
+        lines.append(f"  Прибыльные ({len(winners)}): просадка до плюса в среднем {avg_mae:.2f}R, "
+                     f"{close_calls} почти выбивали стоп (0.8R и больше){cap_text}.")
+        if len(winners) >= MIN_FOR_MAE_MFE and caps and sum(caps) / len(caps) < 0.5:
+            lines.append("  → Прибыльные закрываются рано: из хода забирается меньше половины.")
+    lines.append("")
+    return lines
+
+
 def fmt_bucket(label: str, stats: dict) -> str:
     if stats["n"] < MIN_SAMPLES_FOR_BREAKDOWN:
         return f"  {label}: недостаточно данных ({stats['n']} сделок)"
@@ -543,7 +616,9 @@ def build_message(trades: list, period_start: date, period_end: date, issues: li
 
     # Negative durations come from a date/time typo (already flagged at the top);
     # duration_section leaves those rows out instead of miscounting them.
+    lines.extend(money_section(trades))
     lines.extend(duration_section(trades))
+    lines.extend(mae_mfe_section(trades))
 
     exit_trades = [t for t in trades if t["exit_reason"]]
     if exit_trades:
