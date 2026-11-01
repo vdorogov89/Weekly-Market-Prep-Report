@@ -19,7 +19,7 @@ What this does:
 Expected Google Sheet columns (header row, in this order or any order —
 matched by name, not position):
     Open_Date | Close_Date | Instrument | Direction | Open_Price | Close_Price | Result_R | Rule_Based | CFTC_Aligned | State | Setup | Notes | Open_Time | Close_Time | Stop_Price | Target_Price | Exit_Reason | CFTC_Level
-    Optional extra columns: Result_USD (profit without swap) | Swap | Hold_Hours | MAE_R | MFE_R (MAE/MFE in R, filled by mae_mfe.py)
+    Optional extra columns: Result_USD (profit without swap) | Swap | Carry (За/Против/Нейтр., FX pairs) | Hold_Hours | MAE_R | MFE_R (MAE/MFE in R, filled by mae_mfe.py)
 
     (The last six are optional and can simply be appended after Notes.)
 
@@ -102,6 +102,9 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 SHEET_CSV_URL = os.environ.get("JOURNAL_SHEET_CSV_URL")
 
+# Filled by fetch_journal_rows(): open positions (no Close_Date) that have a Swap value.
+OPEN_POSITIONS = []
+
 MIN_SAMPLES_FOR_BREAKDOWN = 3  # don't report a bucket's stats on fewer trades than this
 
 DATE_FORMATS = ("%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%Y")
@@ -127,6 +130,7 @@ def fetch_journal_rows() -> tuple:
     reader = csv.DictReader(io.StringIO(resp.text))
     rows = []
     skipped = []
+    OPEN_POSITIONS.clear()
     for raw in reader:
         row = {(k or "").strip(): (v or "").strip() for k, v in raw.items()}
         label = f"{row.get('Open_Date') or '?'} {row.get('Instrument') or '?'}"
@@ -140,6 +144,11 @@ def fetch_journal_rows() -> tuple:
             # Close_Date is a real mistake worth flagging.
             if row.get("Result_R"):
                 skipped.append(f"{label}: строка пропущена — есть Result_R, но не заполнен Close_Date")
+            elif row.get("Instrument") and _parse_float(row.get("Swap", "")) is not None and row.get("Open_Date"):
+                od = _parse_date(row["Open_Date"])
+                if od is not None:
+                    OPEN_POSITIONS.append({"instrument": row["Instrument"], "open_date": od,
+                                           "swap": _parse_float(row.get("Swap", ""))})
             continue
         close_date = _parse_date(row["Close_Date"])
         if close_date is None:
@@ -181,6 +190,7 @@ def fetch_journal_rows() -> tuple:
             "rule_based": row.get("Rule_Based", "").strip().lower(),
             "cftc_aligned": row.get("CFTC_Aligned", "").strip().lower(),
             "cftc_level": row.get("CFTC_Level", "").strip().lower(),
+            "carry": row.get("Carry", "").strip().lower(),
             "result_usd": _parse_float(row.get("Result_USD", "")),
             "swap": _parse_float(row.get("Swap", "")),
             "mae_r": _parse_float(row.get("MAE_R", "")),
@@ -523,6 +533,51 @@ def mae_mfe_section(trades: list) -> list:
     return lines
 
 
+def carry_section(trades: list) -> list:
+    """Results by carry side of FX pairs (За / Против / Нейтр.), from the
+    optional Carry column. Silent when the column is empty."""
+    def label(t):
+        c = t.get("carry", "")
+        if c.startswith("за"):
+            return "По carry"
+        if c.startswith("против"):
+            return "Против carry"
+        if c.startswith("нейтр"):
+            return "Нейтрально"
+        return None
+    usable = [t for t in trades if label(t)]
+    if not usable:
+        return []
+    lines = ["\U0001F4B1 Carry (разница ставок, только валютные пары):"]
+    by_carry = compute_breakdown(usable, label)
+    for key in ("По carry", "Против carry", "Нейтрально"):
+        if key in by_carry:
+            lines.append(fmt_bucket(key, by_carry[key]))
+    lines.append("  (у вашего брокера сторона «по carry» не оплачивается: своп там около нуля)")
+    lines.append("")
+    return lines
+
+
+def open_positions_section(today: date) -> list:
+    """Accrued swap on still-open positions and a rough weekly run-rate."""
+    items = [p for p in OPEN_POSITIONS if p.get("swap") is not None]
+    if not items:
+        return []
+    total = sum(p["swap"] for p in items)
+    lines = ["\U0001F4B8 Стоимость удержания открытых позиций (по колонке Swap):"]
+    weekly_total = 0.0
+    for p in sorted(items, key=lambda x: x["swap"]):
+        days = max((today - p["open_date"]).days, 1)
+        weekly = p["swap"] / days * 7
+        weekly_total += weekly
+        lines.append(f"  {p['instrument']} с {p['open_date'].strftime('%d.%m')}: {p['swap']:+.2f} $ "
+                     f"(≈ {weekly:+.2f} $ в неделю)")
+    lines.append(f"  Итого накоплено: {total:+.2f} $, в среднем ≈ {weekly_total:+.2f} $ в неделю.")
+    lines.append("  Оценка по среднему темпу: через среду тройной своп, поэтому недели неравны.")
+    lines.append("")
+    return lines
+
+
 def fmt_bucket(label: str, stats: dict) -> str:
     if stats["n"] < MIN_SAMPLES_FOR_BREAKDOWN:
         return f"  {label}: недостаточно данных ({stats['n']} сделок)"
@@ -550,6 +605,8 @@ def build_message(trades: list, period_start: date, period_end: date, issues: li
 
     if not trades:
         lines.append("За этот период закрытых сделок в таблице не найдено.")
+        lines.append("")
+        lines.extend(open_positions_section(date.today()))
         return "\n".join(lines)
 
     overall = _bucket_stats(trades)
@@ -617,6 +674,8 @@ def build_message(trades: list, period_start: date, period_end: date, issues: li
     # Negative durations come from a date/time typo (already flagged at the top);
     # duration_section leaves those rows out instead of miscounting them.
     lines.extend(money_section(trades))
+    lines.extend(carry_section(trades))
+    lines.extend(open_positions_section(date.today()))
     lines.extend(duration_section(trades))
     lines.extend(mae_mfe_section(trades))
 
