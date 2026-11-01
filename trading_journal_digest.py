@@ -158,6 +158,10 @@ def fetch_journal_rows() -> tuple:
         open_date = _parse_date(row["Open_Date"]) if row.get("Open_Date") else None
 
         result_r = _parse_float(row.get("Result_R", ""))
+        if result_r is None and not row.get("Result_R") and _parse_float(row.get("Result_USD", "")) is not None:
+            # Closed trade recorded only in dollars (stop unknown, so no R): kept in the
+            # sheet for the record, left out of the R-based statistics without a warning.
+            continue
         if result_r is None:
             skipped.append(f"{close_date.strftime('%d.%m.%Y')} {row.get('Instrument') or '?'}: строка пропущена — не читается Result_R {row.get('Result_R', '')!r}")
             continue
