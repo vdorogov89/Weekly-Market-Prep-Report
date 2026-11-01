@@ -1,0 +1,48 @@
+name: Weekly Holding Cost Report
+
+on:
+  schedule:
+    # Sundays 12:00 UTC (15:00 Moscow). GitHub's scheduler is best-effort;
+    # for guaranteed delivery add the same cron-job.org call as for the
+    # reminders (workflow file holding_cost_weekly.yml).
+    - cron: '0 12 * * 0'
+  workflow_dispatch:
+
+jobs:
+  holding-cost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # The previous week's swap values live in the Actions cache, not in git.
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: holding_cost_state.json
+          key: holding-cost-state-${{ github.run_id }}
+          restore-keys: |
+            holding-cost-state-
+
+      - name: Send report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOURNAL_SHEET_CSV_URL: ${{ secrets.JOURNAL_SHEET_CSV_URL }}
+        run: python holding_cost_report.py
+
+      - name: Save state
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: holding_cost_state.json
+          key: holding-cost-state-${{ github.run_id }}
