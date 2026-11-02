@@ -1,67 +1,67 @@
 {
-  "report_date": "2026-10-03",
-  "window_start": "2026-07-02",
-  "window_end": "2026-10-02",
+  "report_date": "2026-11-02",
+  "window_start": "2026-08-01",
+  "window_end": "2026-11-01",
   "companies": [
     {
       "rank": 1,
-      "symbol": "MSFT",
-      "name": "Microsoft",
-      "pct_change": 31.322185749242905
+      "symbol": "PFE",
+      "name": "Pfizer",
+      "pct_change": 21.93367471299741
     },
     {
       "rank": 2,
       "symbol": "CVX",
       "name": "Chevron",
-      "pct_change": 22.399533096926728
+      "pct_change": 21.91738906291485
     },
     {
       "rank": 3,
       "symbol": "XOM",
       "name": "Exxon Mobil",
-      "pct_change": 19.49815068927421
+      "pct_change": 20.759707477875743
     },
     {
       "rank": 4,
-      "symbol": "PFE",
-      "name": "Pfizer",
-      "pct_change": 15.625
+      "symbol": "CCI",
+      "name": "Crown Castle",
+      "pct_change": 15.572061506385193
     },
     {
       "rank": 5,
-      "symbol": "FCX",
-      "name": "Freeport-McMoRan",
-      "pct_change": 13.6296539281614
+      "symbol": "AAPL",
+      "name": "Apple",
+      "pct_change": 13.581830018395946
     },
     {
       "rank": 6,
-      "symbol": "AAPL",
-      "name": "Apple",
-      "pct_change": 7.027835920033709
+      "symbol": "PG",
+      "name": "Procter & Gamble",
+      "pct_change": 11.450651859005312
     },
     {
       "rank": 7,
-      "symbol": "KO",
-      "name": "Coca-Cola",
-      "pct_change": 2.3294485381506913
+      "symbol": "AMT",
+      "name": "American Tower",
+      "pct_change": 8.543352601156062
     },
     {
       "rank": 8,
-      "symbol": "JPM",
-      "name": "JPMorgan Chase",
-      "pct_change": -0.3856878045863765
+      "symbol": "KO",
+      "name": "Coca-Cola",
+      "pct_change": 8.312228874050188
     },
     {
       "rank": 9,
       "symbol": "JNJ",
       "name": "Johnson & Johnson",
-      "pct_change": -1.6651493499606596
+      "pct_change": 7.385719900947296
     },
     {
       "rank": 10,
-      "symbol": "AMT",
-      "name": "American Tower",
-      "pct_change": -2.9934355417300162
+      "symbol": "LIN",
+      "name": "Linde",
+      "pct_change": 7.030762332572182
     }
   ]
 }
