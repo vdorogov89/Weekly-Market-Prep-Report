@@ -1,0 +1,51 @@
+name: Daily Macro Context
+
+on:
+  schedule:
+    # Weekdays 06:20 UTC (09:20 Moscow). Yields are the previous business
+    # day's close (FRED / ECB), FX and gold come from Twelve Data live.
+    # GitHub's scheduler is best-effort; for guaranteed delivery add the same
+    # cron-job.org call as for the other workflows.
+    - cron: '20 6 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  macro-context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # Yesterday's labels (for the "what changed" block) live in the Actions
+      # cache, not in git.
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: macro_context_state.json
+          key: macro-context-state-${{ github.run_id }}
+          restore-keys: |
+            macro-context-state-
+
+      - name: Send report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          JOURNAL_SHEET_CSV_URL: ${{ secrets.JOURNAL_SHEET_CSV_URL }}
+        run: python macro_context.py
+
+      - name: Save state
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: macro_context_state.json
+          key: macro-context-state-${{ github.run_id }}
