@@ -239,39 +239,132 @@ TOP10_STATE_FILE = "top10_companies.json"
 
 def compute_top10(companies: dict, start_date: date, end_date: date) -> tuple:
     """
-    Returns (top_list, analyzed_count, total_count) where top_list is a
-    list of {"rank", "symbol", "name", "pct_change"} dicts, longest
-    first. analyzed_count/total_count are for the "N of M analyzed"
-    footer line.
+    Returns (top_list, analyzed_count, total_count, full_ranking) where
+    top_list is a list of {"rank", "symbol", "name", "pct_change"} dicts,
+    best first, and full_ranking is {symbol: (position, pct_change)} for
+    EVERY analysed ticker (needed to say where last month's leaders ended
+    up even when they dropped out of the top 10).
     """
     symbols = list(companies.keys())
     returns = fetch_window_returns(symbols, start_date, end_date)
 
-    ranked = sorted(returns.items(), key=lambda kv: kv[1], reverse=True)[:TOP_N]
+    ordered = sorted(returns.items(), key=lambda kv: kv[1], reverse=True)
+    full_ranking = {sym: (i, pct) for i, (sym, pct) in enumerate(ordered, start=1)}
     top_list = [
         {"rank": i, "symbol": symbol, "name": companies.get(symbol, symbol), "pct_change": pct}
-        for i, (symbol, pct) in enumerate(ranked, start=1)
+        for i, (symbol, pct) in enumerate(ordered[:TOP_N], start=1)
     ]
-    return top_list, len(returns), len(symbols)
+    return top_list, len(returns), len(symbols), full_ranking
 
 
-def save_top10_state(top_list: list, report_date: date, window_start: date, window_end: date) -> None:
+def load_previous_top10(today: date):
+    """
+    Returns the previous report's data ({"report_date", "window_end",
+    "companies"}) or None. If the state file was already written today
+    (a manual re-run), the snapshot stored inside it is used, so a re-run
+    does not compare the list with itself.
+    """
+    try:
+        with open(TOP10_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if data.get("report_date") == today.isoformat():
+        prev = data.get("previous")
+    else:
+        prev = {"report_date": data.get("report_date"), "window_end": data.get("window_end"),
+                "companies": data.get("companies")}
+    if not prev or not prev.get("companies"):
+        return None
+    return prev
+
+
+def save_top10_state(top_list: list, report_date: date, window_start: date, window_end: date,
+                     previous=None) -> None:
     """
     Saves the top-10 list to a JSON file so a separate daily script
     (company_deepdive.py) can send one deep-dive report per company on
-    the days following this report, in rank order.
+    the days following this report, in rank order. The previous report
+    is kept inside as "previous" (used for the shift arrows).
     """
     data = {
         "report_date": report_date.isoformat(),
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
         "companies": top_list,
+        "previous": previous,
     }
     with open(TOP10_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def build_message(top_list: list, analyzed_count: int, total_count: int, start_date: date, end_date: date) -> str:
+def shift_label(item: dict, prev_ranks: dict) -> str:
+    """How the company moved compared with the previous top 10."""
+    if prev_ranks is None:
+        return ""
+    old = prev_ranks.get(item["symbol"])
+    if old is None:
+        return " \U0001F195 новая в списке"
+    diff = old - item["rank"]
+    if diff > 0:
+        return f" ▲{diff} (было #{old})"
+    if diff < 0:
+        return f" ▼{-diff} (было #{old})"
+    return f" = (было #{old})"
+
+
+def fetch_return_since(symbols: list, from_date: date, to_date: date) -> dict:
+    """Price change from `from_date` to `to_date` for a few tickers (one batch)."""
+    if not symbols or from_date >= to_date:
+        return {}
+    try:
+        time.sleep(BATCH_DELAY_SECONDS)  # stay under the free plan's per-minute credit cap
+        data = _fetch_batch_with_retry(symbols, from_date, to_date)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Warning: could not fetch since-report returns: {exc}", file=sys.stderr)
+        return {}
+    out = {}
+    for sym in symbols:
+        entry = data.get(sym) if len(symbols) > 1 else (data if "values" in data else data.get(sym))
+        if not entry or "values" not in entry or len(entry["values"]) < 2:
+            continue
+        vals = sorted(entry["values"], key=lambda v: v["datetime"])
+        try:
+            out[sym] = (float(vals[-1]["close"]) / float(vals[0]["close"]) - 1) * 100
+        except (KeyError, ValueError, ZeroDivisionError):
+            continue
+    return out
+
+
+def previous_leaders_block(prev: dict, full_ranking: dict, top_list: list, since: dict) -> list:
+    """Lines about the two companies that held places #1 and #2 in the previous report."""
+    if not prev:
+        return []
+    cur_top = {c["symbol"]: c["rank"] for c in top_list}
+    when = prev.get("report_date") or "?"
+    try:
+        when = datetime.fromisoformat(when).strftime("%d.%m.%Y")
+    except ValueError:
+        pass
+    lines = [f"\n\U0001F50E Лидеры прошлого отчёта ({when}) и что с ними стало:"]
+    leaders = [c for c in prev["companies"] if c["rank"] in (1, 2)]
+    for c in sorted(leaders, key=lambda x: x["rank"]):
+        sym = c["symbol"]
+        head = f"#{c['rank']} {sym} ({c['name']}), тогда {c['pct_change']:+.1f}%"
+        if sym in cur_top:
+            place = f"сейчас #{cur_top[sym]} в топ-10 ({full_ranking[sym][1]:+.1f}% за новое окно)"
+        elif sym in full_ranking:
+            pos, pct = full_ranking[sym]
+            place = f"вышла из топ-10, сейчас #{pos} из {len(full_ranking)} ({pct:+.1f}% за новое окно)"
+        else:
+            place = "в новом рейтинге нет данных"
+        tail = f"; с даты прошлого отчёта цена {since[sym]:+.1f}%" if sym in since else ""
+        lines.append(f"• {head} → {place}{tail}")
+    return lines
+
+
+def build_message(top_list: list, analyzed_count: int, total_count: int, start_date: date, end_date: date,
+                  prev=None, full_ranking=None, since=None) -> str:
     header = (
         f"\U0001F3C6 Топ-10 акций S&P 500 по росту цены за последние {WINDOW_MONTHS} месяца\n"
         f"({start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')})\n"
@@ -280,10 +373,13 @@ def build_message(top_list: list, analyzed_count: int, total_count: int, start_d
     if not top_list:
         return header + "\nНе удалось получить данные — см. лог workflow."
 
+    prev_ranks = {c["symbol"]: c["rank"] for c in prev["companies"]} if prev else None
     lines = [header]
     for item in top_list:
         sign = "+" if item["pct_change"] >= 0 else ""
-        lines.append(f"{item['rank']}. {item['symbol']} ({item['name']}): {sign}{item['pct_change']:.1f}%")
+        lines.append(f"{item['rank']}. {item['symbol']} ({item['name']}): "
+                     f"{sign}{item['pct_change']:.1f}%{shift_label(item, prev_ranks)}")
+    lines.extend(previous_leaders_block(prev, full_ranking or {}, top_list, since or {}))
 
     lines.append(
         f"\nПроанализировано инструментов: {analyzed_count} из {total_count} "
@@ -317,12 +413,22 @@ def main() -> None:
     start_date, end_date = rolling_window_bounds(today)
 
     companies = fetch_sp500_list()
-    top_list, analyzed_count, total_count = compute_top10(companies, start_date, end_date)
+    prev = load_previous_top10(today)
+    top_list, analyzed_count, total_count, full_ranking = compute_top10(companies, start_date, end_date)
+
+    since = {}
+    if prev and top_list:
+        leaders = [c["symbol"] for c in prev["companies"] if c["rank"] in (1, 2)]
+        try:
+            since = fetch_return_since(leaders, date.fromisoformat(prev["window_end"]), end_date)
+        except (KeyError, TypeError, ValueError):
+            since = {}
 
     if top_list:
-        save_top10_state(top_list, today, start_date, end_date)
+        save_top10_state(top_list, today, start_date, end_date, previous=prev)
 
-    message = build_message(top_list, analyzed_count, total_count, start_date, end_date)
+    message = build_message(top_list, analyzed_count, total_count, start_date, end_date,
+                            prev, full_ranking, since)
     send_telegram_message(message)
     print("Monthly top gainers report sent.")
 

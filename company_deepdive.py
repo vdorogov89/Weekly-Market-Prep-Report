@@ -39,6 +39,7 @@ not an error.
 
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 
@@ -86,6 +87,42 @@ def save_state(state: dict) -> None:
 # Claude API with web search
 # ---------------------------------------------------------------------
 
+def extract_answer_text(content: list) -> str:
+    """
+    With web search the answer arrives as MANY text blocks: the model's
+    sentences are cut into pieces around every citation, and there can be
+    "let me search" chatter before the search results. Two rules follow:
+      1. the pieces are parts of ONE text, so they are joined with nothing
+         between them (joining with a newline put commas and full stops at
+         the start of lines);
+      2. only the text AFTER the last search result is the answer.
+    """
+    start = 0
+    for i, block in enumerate(content):
+        if block.get("type") in ("web_search_tool_result", "server_tool_use"):
+            start = i + 1
+    parts = [b.get("text", "") for b in content[start:] if b.get("type") == "text"]
+    if not "".join(parts).strip():  # no text after the search: fall back to everything
+        parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+    return clean_text("".join(parts))
+
+
+def clean_text(text: str) -> str:
+    """Removes leftover Markdown and fixes spacing around punctuation."""
+    text = text.replace("\r", "")
+    text = re.sub(r"\*\*|__", "", text)                       # bold
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)          # headings
+    text = re.sub(r"(?m)^\s*[\*\-]\s+", "• ", text)            # bullets
+    text = re.sub(r"\[\d+(?:[,\s]*\d+)*\]", "", text)         # citation marks like [1]
+    text = re.sub(r"[ \t]+([,.;:!?)])", r"\1", text)            # no space before punctuation
+    text = re.sub(r"[ \t]*\n[ \t]*([,.;:!?)])", r"\1", text)    # punctuation that landed on a new line
+    text = re.sub(r"([,;:!?])(?=[^\s\d,.;:!?)/\"»])", r"\1 ", text)  # space after , ; : ! ?
+    text = re.sub(r"(?<=[а-яё])\.(?=[А-ЯЁ])", ". ", text)       # full stop glued to the next sentence
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def generate_deepdive(company: dict, window_start: str, window_end: str, today_str: str) -> str:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
@@ -110,7 +147,11 @@ def generate_deepdive(company: dict, window_start: str, window_end: str, today_s
         "4. Инвестиционный прогноз — что говорят аналитики, основные риски "
         "и на что обратить внимание дальше\n\n"
         "Пиши по существу, без вступлений вроде \"вот разбор\" — сразу "
-        "переходи к сути. Не более 300-350 слов."
+        "переходи к сути. Не более 300-350 слов.\n\n"
+        "Формат: обычный текст без Markdown (никаких звёздочек, решёток и "
+        "ссылок в квадратных скобках). Названия разделов пиши с цифрой и "
+        "точкой в начале строки. Пиши цельными предложениями с правильной "
+        "русской пунктуацией."
     )
 
     headers = {
@@ -129,8 +170,7 @@ def generate_deepdive(company: dict, window_start: str, window_end: str, today_s
         raise RuntimeError(f"Claude API error {resp.status_code}: {resp.text[:300]}")
 
     data = resp.json()
-    text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
-    result = "\n".join(text_blocks).strip()
+    result = extract_answer_text(data.get("content", []))
     if not result:
         raise RuntimeError(f"Claude API returned no text content: {str(data)[:300]}")
     return result
@@ -218,7 +258,7 @@ def main() -> None:
     test_prefix = "\U0001F9EA ТЕСТОВЫЙ ЗАПУСК\n\n" if is_test_mode else ""
     message = (
         f"{test_prefix}\U0001F4C4 Разбор компании #{rank} из топ-10 (рост {company['pct_change']:+.1f}%)\n\n"
-        f"*{company['name']} ({company['symbol']})*\n\n"
+        f"{company['name']} ({company['symbol']})\n\n"
         f"{deepdive_text}"
     )
 
