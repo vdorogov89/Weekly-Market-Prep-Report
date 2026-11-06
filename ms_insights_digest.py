@@ -77,7 +77,11 @@ CLAUDE_MODEL = "claude-sonnet-5"
 
 PAGE_URL = "https://www.morganstanley.com/insights/podcasts/thoughts-on-the-market"
 STATE_FILE = "seen_podcasts.json"
-MAX_STATE_ENTRIES = 200  # keep the state file from growing forever
+# Safety cap for the state file. It must stay well ABOVE the number of
+# episodes the page lists: an episode that is still listed on the page but
+# was dropped from the state looks "new" and is sent again (this is exactly
+# what happened with the old cap of 200, see save_seen_urls).
+MAX_STATE_ENTRIES = 1000
 
 TRANSLATE_URL = "https://api.mymemory.translated.net/get"
 TRANSLATE_CHUNK_CHARS = 450  # stay safely under MyMemory's ~500 char/request limit
@@ -350,11 +354,12 @@ def translate_to_russian(text: str) -> str:
 # State (seen episode URLs) persistence
 # ---------------------------------------------------------------------
 
-def load_seen_urls() -> set:
+def load_seen_urls():
+    """Returns the seen URLs as an ORDERED list (oldest first), or None on the first run."""
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return set(data.get("seen", []))
+        return list(dict.fromkeys(data.get("seen", [])))
     except FileNotFoundError:
         return None  # signals "first run"
     except Exception as exc:  # noqa: BLE001
@@ -362,10 +367,39 @@ def load_seen_urls() -> set:
         return None
 
 
-def save_seen_urls(urls: set) -> None:
-    trimmed = list(urls)[-MAX_STATE_ENTRIES:]
+def merge_seen(seen: list, page_urls_newest_first: list, failed: set = frozenset()) -> list:
+    """
+    Previously seen URLs (oldest first) followed by the URLs that are on the
+    page now and not yet known, oldest first, so the newest end up last.
+    Episodes that failed to send are left out so they are retried.
+    """
+    known = set(seen)
+    merged = list(seen) + [u for u in reversed(page_urls_newest_first) if u not in known]
+    return [u for u in merged if u not in failed]
+
+
+def save_seen_urls(urls: list, on_page=frozenset()) -> None:
+    """
+    Writes the state. ORDER MATTERS: the old version trimmed `list(set)[-200:]`,
+    and a set has no order, so once the file reached 200 entries every run
+    threw away 1-4 RANDOM episodes (including recent ones). Episodes still
+    listed on the page then looked new and old reviews (April, June, ...)
+    were sent again. Now the list keeps its order, nothing that is still on
+    the page is ever removed, and only the oldest entries that are no longer
+    on the page are trimmed once the (large) cap is exceeded.
+    """
+    urls = list(dict.fromkeys(urls))
+    excess = len(urls) - MAX_STATE_ENTRIES
+    if excess > 0:
+        keep = []
+        for u in urls:  # oldest first
+            if excess > 0 and u not in on_page:
+                excess -= 1
+                continue
+            keep.append(u)
+        urls = keep
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"seen": trimmed, "updated": datetime.now(timezone.utc).isoformat()}, f, ensure_ascii=False, indent=2)
+        json.dump({"seen": urls, "updated": datetime.now(timezone.utc).isoformat()}, f, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------
@@ -409,19 +443,21 @@ def main() -> None:
             has_transcript = "yes" if e["transcript"] else "NO TRANSCRIPT"
             print(f"  - {e['title']!r} ({e['url']}) [transcript: {has_transcript}]")
 
-    all_urls = {e["url"] for e in episodes}
+    page_urls = [e["url"] for e in episodes]   # page order, newest first
+    all_urls = set(page_urls)
     seen = load_seen_urls()
 
     if seen is None:
         print("No state file found — this is the first run. Recording current episodes as baseline, sending nothing.")
-        save_seen_urls(all_urls)
+        save_seen_urls(merge_seen([], page_urls), all_urls)
         return
 
-    new_episodes = [e for e in episodes if e["url"] not in seen]
+    seen_set = set(seen)
+    new_episodes = [e for e in episodes if e["url"] not in seen_set]
 
     if not new_episodes:
         print("No new episodes since last run.")
-        save_seen_urls(seen | all_urls)
+        save_seen_urls(merge_seen(seen, page_urls), all_urls)
         return
 
     successfully_sent = set()
@@ -432,7 +468,7 @@ def main() -> None:
             summary_ru = "(транскрипт не найден на странице — см. эпизод по ссылке)"
         message = (
             f"\U0001F3A7 Новый подкаст — Thoughts on the Market\n\n"
-            f"*{episode['title']}*\n\n"
+            f"{episode['title']}\n\n"
             f"{summary_ru}\n\n{episode['url']}"
         )
         try:
@@ -446,7 +482,7 @@ def main() -> None:
     # anything that failed to send stays out of the seen set so it's
     # retried on the next run instead of silently disappearing forever.
     failed_urls = {e["url"] for e in new_episodes} - successfully_sent
-    save_seen_urls((seen | all_urls) - failed_urls)
+    save_seen_urls(merge_seen(seen, page_urls, failed_urls), all_urls)
     print(f"Sent {len(successfully_sent)}/{len(new_episodes)} new podcast episode(s).")
     if failed_urls:
         print(f"{len(failed_urls)} episode(s) failed to send and will be retried next run: {failed_urls}", file=sys.stderr)
