@@ -1,0 +1,30 @@
+name: Monthly Investor Letter
+
+on:
+  schedule:
+    # 18:00 Moscow (15:00 UTC) on days 28-31; the script exits unless
+    # tomorrow is the 1st, so only the real last day sends the draft.
+    - cron: '0 15 28-31 * *'
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Month YYYY-MM (leave empty = only on the last day)'
+        required: false
+
+jobs:
+  letter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Send letter draft
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOURNAL_SHEET_CSV_URL: ${{ secrets.JOURNAL_SHEET_CSV_URL }}
+          MONTH: ${{ github.event.inputs.month }}
+        run: python monthly_investor_letter.py

@@ -200,6 +200,7 @@ def fetch_journal_rows() -> tuple:
             "mae_r": _parse_float(row.get("MAE_R", "")),
             "mfe_r": _parse_float(row.get("MFE_R", "")),
             "h_to_05r": _parse_float(row.get("Hours_to_05R", "")),
+            "notes": row.get("Notes", ""),
             "state": normalize_state(row.get("State", "")),
             "setup": row.get("Setup", "").strip() or "(без тега)",
             "holding_days": holding_days,
