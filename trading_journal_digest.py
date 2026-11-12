@@ -199,6 +199,7 @@ def fetch_journal_rows() -> tuple:
             "swap": _parse_float(row.get("Swap", "")),
             "mae_r": _parse_float(row.get("MAE_R", "")),
             "mfe_r": _parse_float(row.get("MFE_R", "")),
+            "h_to_05r": _parse_float(row.get("Hours_to_05R", "")),
             "state": normalize_state(row.get("State", "")),
             "setup": row.get("Setup", "").strip() or "(без тега)",
             "holding_days": holding_days,
@@ -537,6 +538,38 @@ def mae_mfe_section(trades: list) -> list:
     return lines
 
 
+MIN_FOR_TIME_STOP = 5
+
+
+def time_to_progress_section(trades: list) -> list:
+    """How fast trades first reached +0.5R (optional Hours_to_05R column,
+    filled by mae_mfe.py). Basis for a time-stop: if winners usually show
+    +0.5R within N hours and losers never do, "no progress after N hours"
+    is a usable exit rule. Silent until there is enough data."""
+    closed = [t for t in trades if t.get("mfe_r") is not None and t.get("result_r") is not None]
+    if len(closed) < MIN_FOR_TIME_STOP:
+        return []
+    winners = [t for t in closed if t["result_r"] > 0]
+    losers = [t for t in closed if t["result_r"] < 0]
+    fast = sorted(t["h_to_05r"] for t in winners if t.get("h_to_05r") is not None)
+    lines = ["\u23F1 Тайм-стоп (за сколько часов сделка впервые даёт +0.5R):"]
+    if fast:
+        med = fast[len(fast) // 2]
+        lines.append(f"  Прибыльные ({len(fast)} с данными): +0.5R за {med:.0f} ч (медиана), "
+                     f"самая долгая {fast[-1]:.0f} ч.")
+    never = sum(1 for t in losers if t["mfe_r"] < 0.5)
+    if losers:
+        lines.append(f"  Убыточные ({len(losers)}): {never} так и не дошли до +0.5R.")
+    if fast and losers and len(fast) >= MIN_FOR_TIME_STOP and never / len(losers) >= 0.7:
+        limit = fast[-1] * 1.25
+        lines.append(f"  → Кандидат в правило: нет +0.5R за ~{limit:.0f} ч — закрыть или сократить половину "
+                     f"(проверять на малом риске).")
+    elif len(fast) < MIN_FOR_TIME_STOP:
+        lines.append(f"  Данных пока мало ({len(fast)} прибыльных с временем, нужно {MIN_FOR_TIME_STOP}).")
+    lines.append("")
+    return lines
+
+
 def carry_section(trades: list) -> list:
     """Results by carry side of FX pairs (За / Против / Нейтр.), from the
     optional Carry column. Silent when the column is empty."""
@@ -682,6 +715,7 @@ def build_message(trades: list, period_start: date, period_end: date, issues: li
     lines.extend(open_positions_section(date.today()))
     lines.extend(duration_section(trades))
     lines.extend(mae_mfe_section(trades))
+    lines.extend(time_to_progress_section(trades))
 
     exit_trades = [t for t in trades if t["exit_reason"]]
     if exit_trades:
