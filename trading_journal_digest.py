@@ -629,7 +629,37 @@ def fmt_bucket(label: str, stats: dict) -> str:
 MAX_ISSUES_SHOWN = 10
 
 
-def build_message(trades: list, period_start: date, period_end: date, issues: list = None) -> str:
+EQUITY_WINDOW = 20      # trades in the moving average
+EQUITY_MIN_WINDOW = 5   # shorter window used until there are enough trades
+
+
+def equity_curve_section(all_trades: list) -> list:
+    """Information only (no risk rule attached): where the equity curve in R
+    stands relative to its moving average over the last N closed trades.
+    Uses every closed trade with an R value, in close-date order."""
+    ordered = sorted((t for t in all_trades if t.get("result_r") is not None),
+                     key=lambda t: (t["close_date"], t.get("close_time") or 0))
+    n = len(ordered)
+    if n < EQUITY_MIN_WINDOW + 1:
+        return []
+    window = EQUITY_WINDOW if n > EQUITY_WINDOW else EQUITY_MIN_WINDOW
+    curve = [0.0]
+    for t in ordered:
+        curve.append(curve[-1] + t["result_r"])
+    ma = sum(curve[-window:]) / window
+    now = curve[-1]
+    peak = max(curve)
+    side = "выше" if now >= ma else "ниже"
+    lines = ["\U0001F4C8 Кривая капитала (в R, информация, не правило):",
+             f"  Всего {n} сделок с R: {now:+.2f}R, пик {peak:+.2f}R, от пика {now - peak:+.2f}R.",
+             f"  Скользящая средняя за {window} точек: {ma:+.2f}R, кривая {side} неё на {abs(now - ma):.2f}R."]
+    if window != EQUITY_WINDOW:
+        lines.append(f"  (окно {EQUITY_WINDOW} включится, когда сделок станет больше {EQUITY_WINDOW}; пока короче.)")
+    lines.append("")
+    return lines
+
+
+def build_message(trades: list, period_start: date, period_end: date, issues: list = None, all_trades: list = None) -> str:
     period_label = f"{period_start.strftime('%d.%m.%Y')} — {period_end.strftime('%d.%m.%Y')}"
     lines = [f"\U0001F4D2 Статистика дневника трейдера за период {period_label}\n"]
 
@@ -717,6 +747,7 @@ def build_message(trades: list, period_start: date, period_end: date, issues: li
     lines.extend(duration_section(trades))
     lines.extend(mae_mfe_section(trades))
     lines.extend(time_to_progress_section(trades))
+    lines.extend(equity_curve_section(all_trades if all_trades is not None else trades))
 
     exit_trades = [t for t in trades if t["exit_reason"]]
     if exit_trades:
@@ -819,7 +850,7 @@ def main() -> None:
         f"{period_start}..{period_end}, {len(issues)} data issue(s) flagged."
     )
 
-    message = build_message(trades, period_start, period_end, issues)
+    message = build_message(trades, period_start, period_end, issues, all_trades=all_rows)
     send_telegram_message(message)
     print("Journal stats report sent.")
 
