@@ -208,9 +208,12 @@ def sparse_history(samples, hours):
 
 def analyse(cm, ssr_hist, premium_samples, oi_samples, bd, price_now):
     last = cm[-1]
-    mvrv = last["mvrv"]
+    realized_price = last["price"] / last["mvrv"]    # realized cap / supply (moves slowly)
+    # MVRV is recomputed at the live price: Coin Metrics' daily MVRV is a day or
+    # more behind the quoted price, which in a fast move gave a stale number
+    # (e.g. 1.27 next to a price that implies 1.18).
+    mvrv = price_now / realized_price if price_now else last["mvrv"]
     nupl = 1 - 1 / mvrv                      # NUPL = (MC - RC) / MC
-    realized_price = last["price"] / mvrv    # realized cap / supply
 
     # Netflow and reserve use the last 7 full days
     # (the newest row can be partial, so it is excluded)
@@ -304,9 +307,27 @@ ZONE_TEXT = {
     "SELL_ZONE": "ЗОНА РАСПРЕДЕЛЕНИЯ: MVRV > 3, исторически зона вершин цикла",
 }
 
+# Base rate for comparison with the signals (BTC up after 14 days, 2018-2026,
+# checked on Coin Metrics daily data) and what the tested signals gave on top.
+BASE_UP_14D = 52.4
+BASE_RATE_NOTE = (f"Для сравнения: BTC рос за следующие 14 дней в {BASE_UP_14D:.0f}% случаев (2018–2026); "
+                  "после сильного оттока с бирж — в 61–64%, после сильного притока — в 44–46%.")
+
 DISCLAIMER = ("Это фильтр условий, а не торговая система: нет входа, стопа и объёма. "
               "Проверенные правила: MVRV и нетфлоу/резерв; остальные — стандартные "
               "эвристики без проверки. Прошлая статистика не гарантирует будущее.")
+
+
+def lth_sopr_comment(v):
+    """Plain-language reading of LTH-SOPR that matches the value (informational:
+    on 2022-2026 history it showed no edge over the base rate)."""
+    if v < 1.0:
+        return "ниже 1 — долгосрочные в среднем продают с убытком"
+    if v < 1.5:
+        return "около 1 — долгосрочные в небольшой прибыли, ничего необычного"
+    if v < 2.5:
+        return "выше 1,5 — долгосрочные заметно фиксируют прибыль"
+    return "выше 2,5 — долгосрочные массово фиксируют прибыль"
 
 
 def fmt_usd(x):
@@ -332,7 +353,7 @@ def context_lines(a):
         if a["price"] < a["sth_rp"]:
             lines.append("Цена ниже себестоимости краткосрочных держателей: они в убытке.")
     if a["lth_sopr"] is not None:
-        lines.append(f"LTH-SOPR {a['lth_sopr']:.2f} (>2.5 — долгосрочные массово фиксируют прибыль)")
+        lines.append(f"LTH-SOPR {a['lth_sopr']:.2f} ({lth_sopr_comment(a['lth_sopr'])})")
     if a["adr_chg"] is not None:
         lines.append(f"Активные адреса, 7д к предыдущему месяцу: {a['adr_chg']:+.1f}%")
     if a["oi_chg"] is not None:
@@ -347,6 +368,7 @@ def build_status(a):
             + (f" ({a['price_chg_7d']:+.1f}% за 7д)" if a["price_chg_7d"] is not None else ""),
             "", "Режим: " + ZONE_TEXT[a["zone"]],
             f"Тактический счёт: {a['score']:+d} из ±5 (сигнал при |счёта| ≥ {TACTICAL_ALERT_SCORE})",
+            BASE_RATE_NOTE,
             ""]
     body = indicator_lines(a) + [""] + context_lines(a)
     tail = ["", "Сигнала на покупку/продажу сейчас нет." if abs(a["score"]) < TACTICAL_ALERT_SCORE
