@@ -153,6 +153,27 @@ def fetch_coinmetrics(days=75):
     return rows
 
 
+def fetch_fear_greed():
+    """(today, 7 days ago) of the Crypto Fear & Greed Index (alternative.me)."""
+    d = get_json("https://api.alternative.me/fng/?limit=8&format=json")["data"]
+    return int(d[0]["value"]), int(d[7]["value"])
+
+
+def fetch_vix():
+    """Last VIX close from FRED (one business day behind)."""
+    import csv, io
+    r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS", headers=UA, timeout=30)
+    r.raise_for_status()
+    last = [row for row in csv.reader(io.StringIO(r.text)) if len(row) == 2 and row[1] not in ("", ".")][-1]
+    return float(last[1])
+
+
+def fetch_okx_funding():
+    """Current OKX BTC-USDT-SWAP funding rate, % per 8h (history is not free, so it is logged)."""
+    d = get_json("https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP")["data"][0]
+    return float(d["fundingRate"]) * 100
+
+
 def fetch_coinbase_premium():
     """% Coinbase BTC-USD vs OKX BTC-USDT. Approximation of the CryptoQuant index
     (Binance is not reachable from US cloud IPs)."""
@@ -334,6 +355,39 @@ def context_lines(a):
     return lines
 
 
+def watch_lines(a):
+    """Informational block: candidate indicators from the back-test (2018-2026,
+    train 2018-21 / test 2022-26). None of them is in the score: edges are
+    modest and the number of independent episodes is small."""
+    w = a.get("watch") or {}
+    lines = []
+    ch7 = a.get("price_chg_7d")
+    if ch7 is not None and ch7 >= 15:
+        lines.append(f"Рост за 7д {ch7:+.1f}%: после недели +15% и больше BTC рос за 14 дней в ~62% случаев "
+                     "против 52% базы (в обоих периодах теста; эпизодов 42).")
+    elif ch7 is not None and ch7 <= -15:
+        lines.append(f"Падение за 7д {ch7:+.1f}%: на истории после недели −15% и хуже перевеса нет "
+                     "(рост через 14 дней в 55% и 48% случаев при базе 52%).")
+    if w.get("fng") is not None:
+        now_v, old_v = w["fng"]
+        text = f"Индекс страха и жадности: {now_v} ({now_v - old_v:+d} за 7д)"
+        if now_v - old_v <= -30:
+            text += (" — резкий рост страха: после таких недель BTC рос за 14 дней в ~40% случаев "
+                     "против 52% базы (эпизодов 23, в обоих периодах)")
+        lines.append(text)
+    if w.get("vix") is not None:
+        text = f"VIX {w['vix']:.1f}"
+        if w["vix"] >= 30:
+            text += " — выше 30: через 30 дней BTC рос в ~70% случаев против 53% базы (всего около 19 эпизодов)"
+        lines.append(text)
+    if w.get("funding") is not None:
+        lines.append(f"Funding OKX BTC-USDT: {w['funding']:+.4f}% за 8ч (≈{w['funding'] * 3 * 365:+.1f}% годовых); "
+                     "история копится для проверки")
+    if not lines:
+        return []
+    return ["", "👀 Наблюдение (кандидаты, в счёт не входят):"] + ["  " + x for x in lines]
+
+
 def build_status(a):
     now = datetime.now(MSK).strftime("%d.%m %H:%M МСК")
     head = [f"📊 BTC · недельный статус · {now}",
@@ -343,7 +397,7 @@ def build_status(a):
             f"Тактический счёт: {a['score']:+d} из ±{NUM_INDICATORS} (сигнал при |счёта| ≥ {TACTICAL_ALERT_SCORE})",
             BASE_RATE_NOTE,
             ""]
-    body = indicator_lines(a) + [""] + context_lines(a)
+    body = indicator_lines(a) + [""] + context_lines(a) + watch_lines(a)
     tail = ["", "Сигнала на покупку/продажу сейчас нет." if abs(a["score"]) < TACTICAL_ALERT_SCORE
             and a["zone"] in ("NEUTRAL", "HEAT", "NEAR_BUY") else "Смотри отдельные сигналы выше.",
             "* — не проверено на истории.", ]
@@ -417,6 +471,17 @@ def main():
     premium_samples = premium_samples[-MAX_SAMPLES:]
     oi_samples = [s for s in oi_samples if now - s[0] < 20 * 86400][-MAX_SAMPLES:]
 
+    watch = {}
+    for key, fn in (("fng", fetch_fear_greed), ("vix", fetch_vix), ("funding", fetch_okx_funding)):
+        try:
+            watch[key] = fn()
+        except Exception as exc:  # noqa: BLE001
+            print(f"Warning: {key} unavailable: {exc}", file=sys.stderr)
+    funding_samples = state.get("funding_samples", [])
+    if watch.get("funding") is not None and (not funding_samples or now - funding_samples[-1][0] > 6 * 3600):
+        funding_samples.append([now, watch["funding"]])
+    funding_samples = funding_samples[-1500:]
+
     cache = state.get("bd_cache", {})
     if cache.get("ts") and now - cache["ts"] < 20 * 3600 and cache.get("data"):
         bd = cache["data"]
@@ -428,6 +493,7 @@ def main():
             bd = cache["data"]  # use stale rather than nothing
 
     a = analyse(cm, premium_samples, oi_samples, bd, price_now)
+    a["watch"] = watch
     print(f"Date {a['date']} price {a['price']:.0f} MVRV {a['mvrv']:.3f} zone {a['zone']} score {a['score']}")
     for i in a["items"]:
         print(f"  {i['name']}: {i['text']} -> {i['score']}")
@@ -475,7 +541,7 @@ def main():
         return
     state.update({
         "zone": zone, "alerts": alerts, "premium_samples": premium_samples,
-        "oi_samples": oi_samples, "bd_cache": cache,
+        "oi_samples": oi_samples, "bd_cache": cache, "funding_samples": funding_samples,
         "last_run": now_utc.isoformat(), "last_score": a["score"], "last_mvrv": round(a["mvrv"], 4),
     })
     save_state(state)
