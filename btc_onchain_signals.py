@@ -6,7 +6,6 @@ Sends a message ONLY when conditions for a buy or a sell have formed
 
 DATA (all free, no API keys):
   Coin Metrics community API : price, MVRV, exchange flows/reserve, active addresses
-  DefiLlama                  : total stablecoin supply (for our own SSR)
   Coinbase + OKX public APIs : Coinbase premium (approximation) and OKX open interest
   bitcoin-data.com           : STH/LTH SOPR and STH/LTH realized price,
                                free tier = delayed 7 days, 15 calls/day
@@ -16,11 +15,13 @@ TWO TIERS OF SIGNAL
        MVRV < 1.0 -> 180d later price was higher in 82% of cases (median +57%)
        MVRV > 3.0 -> 180d later higher in only 48% (median -2%)
        MVRV 1.0-3.0 -> no useful edge. That is why there is no signal there.
-  2) TACTICAL (weeks, from exchange flows + sentiment): a score of 5 indicators.
+  2) TACTICAL (weeks, from exchange flows + sentiment): a score of 4 indicators.
        Two of them were checked on history (7d netflow, 30d reserve change):
        big outflows -> 14d later up in ~61-64% (median +2.8%), big inflows
        -> up in 44-46%. The edge is modest. The other three (Coinbase
-       premium, SSR trend, STH-SOPR) are standard heuristics, NOT verified.
+       premium, STH-SOPR) are standard heuristics; SSR was removed after a back-test
+       (no edge, mechanically follows price). STH-SOPR < 0.98 was checked 2022-2026:
+       up in 71% over 14d vs 54.5% base; its sell side showed no edge.
 
 This is an information filter, not a trading system: no entry, stop or
 position size. Past statistics do not guarantee the future.
@@ -62,11 +63,11 @@ RESERVE30_SELL = 2.85
 
 PREMIUM_BUY = 0.10           # % (Coinbase vs OKX USDT), average of recent samples
 PREMIUM_SELL = -0.10
-SSR_CHANGE = 5.0             # % change of our SSR over 30 days
 STH_SOPR_BUY = 0.98          # < : short-term holders sell at a loss (capitulation)
 STH_SOPR_SELL = 1.05         # > : short-term holders take profit aggressively
 
-TACTICAL_ALERT_SCORE = 3     # of 5; |score| >= this -> alert
+NUM_INDICATORS = 4           # netflow 7d, reserve 30d, Coinbase premium, STH-SOPR
+TACTICAL_ALERT_SCORE = 3     # of 4; |score| >= this -> alert
 TACTICAL_COOLDOWN_H = 72
 STRATEGIC_REMIND_DAYS = 14   # re-remind while still inside a zone
 MAX_SAMPLES = 400            # premium/OI samples kept in state
@@ -152,19 +153,6 @@ def fetch_coinmetrics(days=75):
     return rows
 
 
-def fetch_stablecoin_series():
-    """{date: total USD stablecoin supply} from DefiLlama."""
-    data = get_json("https://stablecoins.llama.fi/stablecoincharts/all", timeout=40)
-    out = {}
-    for p in data[-90:]:
-        try:
-            d = datetime.fromtimestamp(int(p["date"]), tz=timezone.utc).strftime("%Y-%m-%d")
-            out[d] = float(p["totalCirculatingUSD"]["peggedUSD"])
-        except (KeyError, ValueError, TypeError):
-            continue
-    return out
-
-
 def fetch_coinbase_premium():
     """% Coinbase BTC-USD vs OKX BTC-USDT. Approximation of the CryptoQuant index
     (Binance is not reachable from US cloud IPs)."""
@@ -206,7 +194,7 @@ def sparse_history(samples, hours):
     return [v for t, v in samples if t >= cutoff]
 
 
-def analyse(cm, ssr_hist, premium_samples, oi_samples, bd, price_now):
+def analyse(cm, premium_samples, oi_samples, bd, price_now):
     last = cm[-1]
     realized_price = last["price"] / last["mvrv"]    # realized cap / supply (moves slowly)
     # MVRV is recomputed at the live price: Coin Metrics' daily MVRV is a day or
@@ -224,15 +212,6 @@ def analyse(cm, ssr_hist, premium_samples, oi_samples, bd, price_now):
     adr_now = sum(r["adr"] for r in full[-7:]) / 7
     adr_prev = sum(r["adr"] for r in full[-37:-30]) / 7 if len(full) >= 37 else None
     adr_chg = pct(adr_now, adr_prev) if adr_prev else None
-
-    # SSR = BTC market cap / stablecoin supply (our own series; absolute number
-    # differs from CryptoQuant's, only the trend is used)
-    ssr_now = ssr_chg = None
-    d_now, d_old = full[-1]["date"], full[-31]["date"]
-    if d_now in ssr_hist and d_old in ssr_hist:
-        ssr_now = full[-1]["mcap"] / ssr_hist[d_now]
-        ssr_old = full[-31]["mcap"] / ssr_hist[d_old]
-        ssr_chg = pct(ssr_now, ssr_old)
 
     prem_vals = sparse_history(premium_samples, 24)
     premium = sum(prem_vals) / len(prem_vals) if len(prem_vals) >= 3 else None
@@ -257,12 +236,6 @@ def analyse(cm, ssr_hist, premium_samples, oi_samples, bd, price_now):
             1 if premium >= PREMIUM_BUY else -1 if premium <= PREMIUM_SELL else 0, False)
     else:
         add("Coinbase Premium", "копятся замеры", 0, False)
-    if ssr_chg is not None:
-        # falling SSR = more stablecoin buying power relative to BTC -> bullish
-        add("SSR 30д", f"{ssr_chg:+.1f}%",
-            1 if ssr_chg <= -SSR_CHANGE else -1 if ssr_chg >= SSR_CHANGE else 0, False)
-    else:
-        add("SSR 30д", "нет данных", 0, False)
     sth = bd.get("sth_sopr")
     if sth is not None:
         add("STH-SOPR (лаг 7д)", f"{sth:.3f}",
@@ -367,7 +340,7 @@ def build_status(a):
             f"Цена {fmt_usd(a['price'])}"
             + (f" ({a['price_chg_7d']:+.1f}% за 7д)" if a["price_chg_7d"] is not None else ""),
             "", "Режим: " + ZONE_TEXT[a["zone"]],
-            f"Тактический счёт: {a['score']:+d} из ±5 (сигнал при |счёта| ≥ {TACTICAL_ALERT_SCORE})",
+            f"Тактический счёт: {a['score']:+d} из ±{NUM_INDICATORS} (сигнал при |счёта| ≥ {TACTICAL_ALERT_SCORE})",
             BASE_RATE_NOTE,
             ""]
     body = indicator_lines(a) + [""] + context_lines(a)
@@ -393,7 +366,7 @@ def build_strategic(a, kind):
         stat = "Это предупреждение о росте риска, а не сигнал на продажу."
     lines = [title, f"Цена {fmt_usd(a['price'])} · {a['date']}", "", stat, ""]
     lines += context_lines(a) + [""] + indicator_lines(a)
-    lines += ["", f"Тактический счёт: {a['score']:+d} из ±5", "", DISCLAIMER]
+    lines += ["", f"Тактический счёт: {a['score']:+d} из ±{NUM_INDICATORS}", "", DISCLAIMER]
     return "\n".join(lines)
 
 
@@ -410,7 +383,7 @@ def build_tactical(a, side):
                 "медиана около −1.6%. Преимущество скромное.")
     zone_note = "Фон: " + ZONE_TEXT[a["zone"]]
     lines = [title, f"Цена {fmt_usd(a['price'])} · {a['date']}", "",
-             f"Счёт {a['score']:+d} из ±5", ""]
+             f"Счёт {a['score']:+d} из ±{NUM_INDICATORS}", ""]
     lines += indicator_lines(a) + ["", what, "", zone_note, ""]
     lines += context_lines(a) + ["", "* — не проверено на истории.", DISCLAIMER]
     return "\n".join(lines)
@@ -426,12 +399,6 @@ def main():
     now_utc = datetime.now(timezone.utc)
 
     cm = fetch_coinmetrics()
-
-    try:
-        ssr_hist = fetch_stablecoin_series()
-    except Exception as exc:  # noqa: BLE001
-        print(f"Warning: stablecoin data unavailable: {exc}", file=sys.stderr)
-        ssr_hist = {}
 
     premium_samples = state.get("premium_samples", [])
     price_now = None
@@ -460,7 +427,7 @@ def main():
         elif cache.get("data"):
             bd = cache["data"]  # use stale rather than nothing
 
-    a = analyse(cm, ssr_hist, premium_samples, oi_samples, bd, price_now)
+    a = analyse(cm, premium_samples, oi_samples, bd, price_now)
     print(f"Date {a['date']} price {a['price']:.0f} MVRV {a['mvrv']:.3f} zone {a['zone']} score {a['score']}")
     for i in a["items"]:
         print(f"  {i['name']}: {i['text']} -> {i['score']}")
