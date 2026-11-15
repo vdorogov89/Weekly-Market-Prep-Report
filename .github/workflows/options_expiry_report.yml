@@ -1,0 +1,45 @@
+name: Options Expiry Report
+
+on:
+  schedule:
+    # Weekdays 06:30 UTC (09:30 Moscow, before the US open). The script only
+    # sends on the Monday of expiration week and on the expiry day itself.
+    # GitHub's scheduler is best-effort; the "missed Monday" logic sends on the
+    # first run of the week instead. For guaranteed delivery add a cron-job.org call.
+    - cron: '30 6 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      expiry:
+        description: 'Force a report for this expiry date YYYYMMDD (test; ignores the schedule)'
+        required: false
+
+jobs:
+  options-expiry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: options_expiry_state.json
+          key: options-expiry-state-${{ github.run_id }}
+          restore-keys: |
+            options-expiry-state-
+      - name: Send report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOURNAL_SHEET_CSV_URL: ${{ secrets.JOURNAL_SHEET_CSV_URL }}
+          FORCE_EXPIRY: ${{ github.event.inputs.expiry }}
+        run: python options_expiry_report.py
+      - name: Save state
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: options_expiry_state.json
+          key: options-expiry-state-${{ github.run_id }}
