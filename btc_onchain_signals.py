@@ -15,7 +15,8 @@ TWO TIERS OF SIGNAL
        MVRV < 1.0 -> 180d later price was higher in 82% of cases (median +57%)
        MVRV > 3.0 -> 180d later higher in only 48% (median -2%)
        MVRV 1.0-3.0 -> no useful edge. That is why there is no signal there.
-  2) TACTICAL (weeks, from exchange flows + sentiment): a score of 4 indicators.
+  2) TACTICAL (weeks): ONE alert, STH-SOPR < 0.98 (buy side only). Exchange netflow,
+       reserve and Coinbase premium are shown as information, not as signals.
        Two of them were checked on history (7d netflow, 30d reserve change):
        big outflows -> 14d later up in ~61-64% (median +2.8%), big inflows
        -> up in 44-46%. The edge is modest. The other three (Coinbase
@@ -66,9 +67,7 @@ PREMIUM_SELL = -0.10
 STH_SOPR_BUY = 0.98          # < : short-term holders sell at a loss (capitulation)
 STH_SOPR_SELL = 1.05         # > : short-term holders take profit aggressively
 
-NUM_INDICATORS = 4           # netflow 7d, reserve 30d, Coinbase premium, STH-SOPR
-TACTICAL_ALERT_SCORE = 3     # of 4; |score| >= this -> alert
-TACTICAL_COOLDOWN_H = 72
+STH_BUY_COOLDOWN_H = 7 * 24  # STH-SOPR data is daily and 7 days behind; capitulation lasts weeks
 STRATEGIC_REMIND_DAYS = 14   # re-remind while still inside a zone
 MAX_SAMPLES = 400            # premium/OI samples kept in state
 
@@ -260,7 +259,7 @@ def analyse(cm, premium_samples, oi_samples, bd, price_now):
     sth = bd.get("sth_sopr")
     if sth is not None:
         add("STH-SOPR (лаг 7д)", f"{sth:.3f}",
-            1 if sth < STH_SOPR_BUY else -1 if sth > STH_SOPR_SELL else 0, False)
+            1 if sth < STH_SOPR_BUY else 0, True)  # buy side only: the sell side showed no edge
     else:
         add("STH-SOPR", "нет данных", 0, False)
 
@@ -281,7 +280,7 @@ def analyse(cm, premium_samples, oi_samples, bd, price_now):
     return {
         "date": last["date"], "price": price_now or last["price"], "mvrv": mvrv,
         "nupl": nupl, "realized_price": realized_price, "zone": zone,
-        "score": score, "items": items, "adr_chg": adr_chg, "oi_chg": oi_chg,
+        "score": score, "sth_buy": bool(sth is not None and sth < STH_SOPR_BUY), "sth": sth, "items": items, "adr_chg": adr_chg, "oi_chg": oi_chg,
         "oi_now": oi_samples[-1][1] if oi_samples else None,
         "sth_rp": bd.get("sth_rp"), "lth_rp": bd.get("lth_rp"),
         "lth_sopr": bd.get("lth_sopr"), "bd_asof": bd.get("asof"),
@@ -308,8 +307,8 @@ BASE_RATE_NOTE = (f"Для сравнения: BTC рос за следующи�
                   "после сильного оттока с бирж — в 61–64%, после сильного притока — в 44–46%.")
 
 DISCLAIMER = ("Это фильтр условий, а не торговая система: нет входа, стопа и объёма. "
-              "Проверенные правила: MVRV и нетфлоу/резерв; остальные — стандартные "
-              "эвристики без проверки. Прошлая статистика не гарантирует будущее.")
+              "Проверено на истории: MVRV, STH-SOPR на покупку, нетфлоу/резерв (информационно); "
+              "остальное — стандартные эвристики без проверки. Прошлая статистика не гарантирует будущее.")
 
 
 def lth_sopr_comment(v):
@@ -394,11 +393,12 @@ def build_status(a):
             f"Цена {fmt_usd(a['price'])}"
             + (f" ({a['price_chg_7d']:+.1f}% за 7д)" if a["price_chg_7d"] is not None else ""),
             "", "Режим: " + ZONE_TEXT[a["zone"]],
-            f"Тактический счёт: {a['score']:+d} из ±{NUM_INDICATORS} (сигнал при |счёта| ≥ {TACTICAL_ALERT_SCORE})",
+            f"Сигнал покупки по STH-SOPR (< {STH_SOPR_BUY}): "
+            + ("ЕСТЬ" if a["sth_buy"] else "нет" + (f" (сейчас {a['sth']:.3f})" if a["sth"] is not None else "")),
             BASE_RATE_NOTE,
             ""]
     body = indicator_lines(a) + [""] + context_lines(a) + watch_lines(a)
-    tail = ["", "Сигнала на покупку/продажу сейчас нет." if abs(a["score"]) < TACTICAL_ALERT_SCORE
+    tail = ["", "Сигнала на покупку/продажу сейчас нет." if not a["sth_buy"]
             and a["zone"] in ("NEUTRAL", "HEAT", "NEAR_BUY") else "Смотри отдельные сигналы выше.",
             "* — не проверено на истории.", ]
     return "\n".join(head + body + tail)
@@ -420,25 +420,21 @@ def build_strategic(a, kind):
         stat = "Это предупреждение о росте риска, а не сигнал на продажу."
     lines = [title, f"Цена {fmt_usd(a['price'])} · {a['date']}", "", stat, ""]
     lines += context_lines(a) + [""] + indicator_lines(a)
-    lines += ["", f"Тактический счёт: {a['score']:+d} из ±{NUM_INDICATORS}", "", DISCLAIMER]
+    lines += ["", DISCLAIMER]
     return "\n".join(lines)
 
 
-def build_tactical(a, side):
-    if side == "BUY":
-        title = "🟢 BTC · складываются условия для ПОКУПКИ (тактический)"
-        what = ("Монеты уходят с бирж, давление предложения снижается. "
-                "На истории (2018–2026) сильный отток с бирж давал рост через 14 дней в ~61–64% "
-                "случаев, медиана около +3%. Преимущество скромное.")
-    else:
-        title = "🔴 BTC · складываются условия для ПРОДАЖИ / сокращения (тактический)"
-        what = ("Монеты притекают на биржи, давление продавцов растёт. На истории (2018–2026) "
-                "сильный приток на биржи давал рост через 14 дней лишь в ~44–46% случаев, "
-                "медиана около −1.6%. Преимущество скромное.")
-    zone_note = "Фон: " + ZONE_TEXT[a["zone"]]
-    lines = [title, f"Цена {fmt_usd(a['price'])} · {a['date']}", "",
-             f"Счёт {a['score']:+d} из ±{NUM_INDICATORS}", ""]
-    lines += indicator_lines(a) + ["", what, "", zone_note, ""]
+def build_sth_buy(a):
+    lines = ["🟢 BTC · капитуляция краткосрочных держателей (STH-SOPR < "
+             f"{STH_SOPR_BUY})",
+             f"Цена {fmt_usd(a['price'])} · {a['date']}", "",
+             f"STH-SOPR {a['sth']:.3f} (данные на {a['bd_asof']}, отстают на 7 дней): краткосрочные держатели "
+             "в среднем продают монеты с убытком.",
+             "На истории (2022–2026) в такие дни BTC рос за следующие 14 дней в ~71% случаев "
+             "(20 независимых эпизодов) против 54,5% базы, медиана около +3%. "
+             "Лаг 7 дней почти не ухудшает результат: капитуляция тянется неделями. "
+             "Преимущество умеренное, выборка мала.", ""]
+    lines += indicator_lines(a) + ["", "Фон: " + ZONE_TEXT[a["zone"]], ""]
     lines += context_lines(a) + ["", "* — не проверено на истории.", DISCLAIMER]
     return "\n".join(lines)
 
@@ -494,7 +490,7 @@ def main():
 
     a = analyse(cm, premium_samples, oi_samples, bd, price_now)
     a["watch"] = watch
-    print(f"Date {a['date']} price {a['price']:.0f} MVRV {a['mvrv']:.3f} zone {a['zone']} score {a['score']}")
+    print(f"Date {a['date']} price {a['price']:.0f} MVRV {a['mvrv']:.3f} zone {a['zone']} sth_buy {a['sth_buy']}")
     for i in a["items"]:
         print(f"  {i['name']}: {i['text']} -> {i['score']}")
 
@@ -512,9 +508,8 @@ def main():
             messages.append(("zone:" + zone, build_strategic(a, zone)))
 
     # 2) tactical
-    side = "BUY" if a["score"] >= TACTICAL_ALERT_SCORE else "SELL" if a["score"] <= -TACTICAL_ALERT_SCORE else None
-    if side and now - alerts.get("tactical:" + side, 0) > TACTICAL_COOLDOWN_H * 3600:
-        messages.append(("tactical:" + side, build_tactical(a, side)))
+    if a["sth_buy"] and now - alerts.get("sth_buy", 0) > STH_BUY_COOLDOWN_H * 3600:
+        messages.append(("sth_buy", build_sth_buy(a)))
 
     # 3) weekly status: Sunday, once (also on demand)
     iso_week = now_utc.strftime("%G-%V")
@@ -542,7 +537,7 @@ def main():
     state.update({
         "zone": zone, "alerts": alerts, "premium_samples": premium_samples,
         "oi_samples": oi_samples, "bd_cache": cache, "funding_samples": funding_samples,
-        "last_run": now_utc.isoformat(), "last_score": a["score"], "last_mvrv": round(a["mvrv"], 4),
+        "last_run": now_utc.isoformat(), "last_sth": a["sth"], "last_mvrv": round(a["mvrv"], 4),
     })
     save_state(state)
     if failed:
